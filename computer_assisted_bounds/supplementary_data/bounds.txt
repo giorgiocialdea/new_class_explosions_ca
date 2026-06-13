@@ -1,0 +1,13 @@
+# label|value|side|description
+BB0_lower|0.009|lower|lower bound for tilde{BB}_0 in Table~\ref{table:bb}
+BB0_upper|127.2|upper|upper bound for tilde{BB}_0 in Table~\ref{table:bb}
+BB1_lower|4.1|lower|lower bound for tilde{BB}_1 in Table~\ref{table:bb}
+BB1_upper|12508.1|upper|upper bound for tilde{BB}_1 in Table~\ref{table:bb}
+BB2_lower|60.3|lower|lower bound for tilde{BB}_2 in Table~\ref{table:bb}
+BB2_upper|1625863.7|upper|upper bound for tilde{BB}_2 in Table~\ref{table:bb}
+BB3_lower|4.6|lower|lower bound for tilde{BB}_3 in Table~\ref{table:bb}
+BB3_upper|571287.3|upper|upper bound for tilde{BB}_3 in Table~\ref{table:bb}
+BB4_lower|4.9|lower|lower bound for tilde{BB}_4 in Table~\ref{table:bb}
+BB4_upper|44572.8|upper|upper bound for tilde{BB}_4 in Table~\ref{table:bb}
+BB5_lower|0.006|lower|lower bound for tilde{BB}_5 in Table~\ref{table:bb}
+BB5_upper|1304.1|upper|upper bound for tilde{BB}_5 in Table~\ref{table:bb}
