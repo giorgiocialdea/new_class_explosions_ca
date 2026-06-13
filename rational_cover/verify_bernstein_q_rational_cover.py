@@ -781,7 +781,7 @@ class CoverResult:
     idx: int
     interval: CoverInterval
     minimum: Fraction
-    witness_j: int
+    coefficient_j: int
     box: Tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction]
 
 
@@ -794,7 +794,7 @@ def verify_interval(
 ) -> CoverResult:
     scaled_c_min, scaled_c_max, scaled_v_min, scaled_v_max, rr_min, rr_max = rational_box(interval, box_digits)
     minimum: Optional[Fraction] = None
-    witness_j: Optional[int] = None
+    coefficient_j: Optional[int] = None
     for j, form in enumerate(normal_forms):
         for c_corner, v_corner, rr_corner in product(
             [scaled_c_min, scaled_c_max], [scaled_v_min, scaled_v_max], [rr_min, rr_max]
@@ -805,17 +805,17 @@ def verify_interval(
             )
             if minimum is None or local_minimum < minimum:
                 minimum = local_minimum
-                witness_j = j
-    assert minimum is not None and witness_j is not None
+                coefficient_j = j
+    assert minimum is not None and coefficient_j is not None
     if minimum <= 0:
         raise AssertionError(
-            f"failed on interval {interval.tex_interval()}, coefficient j={witness_j}, minimum={minimum}"
+            f"failed on interval {interval.tex_interval()}, coefficient j={coefficient_j}, minimum={minimum}"
         )
     return CoverResult(
         idx=idx,
         interval=interval,
         minimum=minimum,
-        witness_j=witness_j,
+        coefficient_j=coefficient_j,
         box=(scaled_c_min, scaled_c_max, scaled_v_min, scaled_v_max, rr_min, rr_max),
     )
 
@@ -963,7 +963,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for row in cover_rows:
             print(
                 f"{row.idx:2d} [{row.interval.left},{row.interval.right}] "
-                f"mu={display_decimal(row.minimum):>12} coefficient j={row.witness_j}"
+                f"mu={display_decimal(row.minimum):>12} coefficient j={row.coefficient_j}"
             )
 
     if args.tex_tables:
