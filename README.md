@@ -47,9 +47,7 @@ Optional flags:
     endpoint boxes.
   * `--bernstein-degree N` uses one common Bernstein degree for interval
     polynomials.
-  * `--tex-tables tables.tex` creates or overwrites that file with the
-    generated TeX tables. If a path includes a directory, the directory must
-    already exist.
+  * `--tex-tables path/to/tables.tex` writes the generated TeX tables.
   * `--verbose` prints the normal-form details and every interval in the cover.
 
 ## Computer-assisted bounds
@@ -122,7 +120,3 @@ Files in this component:
     bounds appearing in `Table~\ref{table:bb}`. Each non-comment line has the
     form `label|value|side|description`.
 
-If a table bound changes, update `supplementary_data/bounds.txt` and rerun
-`script.py`. The labels and their `lower`/`upper` side tags are checked by
-`substituting_estimates()`, so a missing label or a swapped side is reported as
-a verification failure.
