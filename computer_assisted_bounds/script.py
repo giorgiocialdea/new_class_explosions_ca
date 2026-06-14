@@ -1,6 +1,5 @@
-#!/usr/bin/env python
-# coding: utf-8
-"""Main script reproducing the computer-assisted checks reported in the paper."""
+
+"""Main script"""
 
 import argparse
 import sys

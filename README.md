@@ -29,10 +29,8 @@ Running this script reproduces the rational-cover verification:
 
 Optional flags:
 
-  * `--box-digits N` changes the number of decimal digits used in the rational endpoint boxes.
-  * `--bernstein-degree N` uses one common Bernstein degree for the interval polynomials.
   * `--tex-tables tables.tex` creates or overwrites the named file with the generated TeX tables. If the path includes a directory, that directory must already exist.
-  * `--verbose` prints the normal-form details and every interval in the cover.
+  * `--verbose` prints every interval in the cover.
 
 ### `computer_assisted_bounds/script.py`
 
@@ -53,8 +51,8 @@ A successful run ends with:
 Optional flags:
 
   * `--verbose` or `-v` prints row-level progress and the bounds read from `bounds.txt`.
-  * `--print-subintervals` prints every accepted subinterval and its local margins.
-  * `-vv` is equivalent to verbose mode with the subinterval trace enabled.
+  * `--print-subintervals` prints every accepted subinterval.
+  * `-vv` is equivalent to verbose mode with the subinterval flag enabled.
 
 ### `computer_assisted_bounds/lemmas.py`
 

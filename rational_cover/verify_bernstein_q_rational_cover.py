@@ -9,8 +9,6 @@ in
     scaled_c = (1+3*alpha)c_r,   scaled_v = (1+3*alpha)V_2,   rr < 0,
 
 and then checks a finite rational cover using exact rational arithmetic.
-SymPy is used only to take exact floors/ceilings of the algebraic endpoint
-values that define the rational boxes for (scaled_c, scaled_v, rr).
 """
 
 from __future__ import annotations

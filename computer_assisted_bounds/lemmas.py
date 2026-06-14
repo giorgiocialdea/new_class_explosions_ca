@@ -4,7 +4,7 @@ r"""Lemma-level interval verification for Table~\ref{table:bb}.
 
 The public routine ``bernstein_bounds()`` corresponds to the paper statement
 Lemma~\ref{lemma:Bernstein:q} / Table~\ref{table:bb}.  The file is
-self-contained apart from the global numerical parameters in ``parameters.py``
+self-contained apart from the parameters in ``parameters.py``
 and the rounded constants in ``supplementary_data/bounds.txt``.
 """
 
@@ -103,8 +103,6 @@ def load_bounds(path=None):
 def _print_local_box(problem, box, value, method, lower_bound, upper_bound) -> None:
     """Verbose debugging output for one accepted subinterval.
 
-    The proof itself is the interval comparison made before this function is
-    called.  This printout is only a human-readable trace.
     """
     lo = lower(value)
     hi = upper(value)
@@ -415,8 +413,7 @@ class Sqrt(Expr):
 
 class Shared(Expr):
     """Memoizing wrapper.
-
-    Each (id(self), want_derivative) is evaluated at most once per box
+    Each (id(self), want_derivative) is evaluated at most once per box.
     because the cache lives on Context and is cleared at the start of every
     top-level eval_direct/eval_derivative call.
     """
@@ -516,7 +513,6 @@ class ProblemAPI:
         """Wrap a subexpression so its interval value is cached per box.
 
         Use for expressions referenced many times (cr, V2, common sqrts).
-        Wrapping a Shared again is a no-op.
         """
         e = as_expr(x)
         if isinstance(e, Shared):
@@ -656,9 +652,7 @@ def _best_table_enclosure(
         and _inside_table_bounds(direct.value, lower_bound, upper_bound)
     )
 
-    # The first-order Taylor enclosure is the main sharpening step. It is also
-    # tried when direct interval arithmetic already succeeds, so that the
-    # reported enclosure is as tight as the actual check permits.
+
     taylor = eval_taylor1(expr, box.a, box.b, ctx)
     taylor_ok = (
         taylor.ok
@@ -794,7 +788,7 @@ def prove_table_row(
 # ---------------------------------------------------------------------------
 
 def make_cr_and_V2(alpha, api):
-    """Build cr(alpha) and V2(alpha) from the hard-expression definitions.
+    """Build cr(alpha) and V2(alpha).
 
     Both are wrapped with api.shared(...) so the verifier evaluates each
     only once per box.
