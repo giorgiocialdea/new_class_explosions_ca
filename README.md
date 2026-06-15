@@ -18,9 +18,9 @@ The interval-arithmetic verification must be run in a SageMath-enabled Python en
 
 Script verifying the rational-cover part of Lemma~\ref{lemma:Bernstein:q}.
 
-  * Uses exact rational arithmetic.
+  * Constructs certified outward-rounded rational boxes and uses exact rational Bernstein checks.
   * Checks the small-alpha case and the rational cover of `[10^(-2),1+sqrt(2)]`.
-  * Can optionally print the generated TeX tables.
+  * Can optionally write the generated TeX tables.
 
 Running this script reproduces the rational-cover verification:
 
