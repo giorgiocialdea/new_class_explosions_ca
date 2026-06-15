@@ -26,9 +26,9 @@ import sympy as sp
 
 
 # ---------------------------------------------------------------------------
-# One-variable rational-polynomial arithmetic in alpha
+# One-variable polynomial in alpha arithmetic
 # ---------------------------------------------------------------------------
-
+# A polynomial is stored as a tuple of coefficients: (c0, c1, c2, ...) means c0+c1*alpha+c2*alpha^2+...
 Poly = Tuple[Fraction, ...]  # coefficients in increasing powers of alpha
 ZERO_POLY: Poly = ()
 ONE_POLY: Poly = (Fraction(1),)
@@ -36,7 +36,7 @@ ALPHA_POLY: Poly = (Fraction(0), Fraction(1))
 SIGMA_POLY: Poly = (Fraction(1), Fraction(3))  # 1+3 alpha
 GAMMA_POLY: Poly = (Fraction(1), Fraction(2))  # 1+2 alpha
 
-
+# Remove trailing zero coefficients
 def trim(poly: Iterable[Fraction]) -> Poly:
     out = tuple(Fraction(c) for c in poly)
     n = len(out)
@@ -44,7 +44,7 @@ def trim(poly: Iterable[Fraction]) -> Poly:
         n -= 1
     return out[:n]
 
-
+# Polynomial addition
 def poly_add(p: Poly, q: Poly) -> Poly:
     n = max(len(p), len(q))
     out = [Fraction(0)] * n
@@ -52,15 +52,15 @@ def poly_add(p: Poly, q: Poly) -> Poly:
         out[i] = (p[i] if i < len(p) else 0) + (q[i] if i < len(q) else 0)
     return trim(out)
 
-
+# Transform a pollynomial Poly into -Poly
 def poly_neg(p: Poly) -> Poly:
     return tuple(-c for c in p)
 
-
+# Subtraction of polynomials
 def poly_sub(p: Poly, q: Poly) -> Poly:
     return poly_add(p, poly_neg(q))
 
-
+# Multiplication of polynomials
 def poly_mul(p: Poly, q: Poly) -> Poly:
     if not p or not q:
         return ZERO_POLY
@@ -73,14 +73,14 @@ def poly_mul(p: Poly, q: Poly) -> Poly:
                 out[i + j] += ci * cj
     return trim(out)
 
-
+# Rescale a polynomial by a rational constant
 def poly_scale(p: Poly, c: Fraction | int) -> Poly:
     c = Fraction(c)
     if c == 0 or not p:
         return ZERO_POLY
     return trim(ci * c for ci in p)
 
-
+# Cache repeated powers of alpha, sigma=(1+3*alpha), and gamma=(1+2*alpha).
 @lru_cache(maxsize=None)
 def factor_power(name: str, exponent: int) -> Poly:
     factor = {"a": ALPHA_POLY, "s": SIGMA_POLY, "g": GAMMA_POLY}[name]
@@ -89,7 +89,7 @@ def factor_power(name: str, exponent: int) -> Poly:
         out = poly_mul(out, factor)
     return out
 
-
+# Try to divide a polynomial by alpha exactly. Return None if alpha is not a factor.
 def poly_div_alpha_exact(p: Poly) -> Optional[Poly]:
     p = trim(p)
     if not p:
@@ -98,7 +98,7 @@ def poly_div_alpha_exact(p: Poly) -> Optional[Poly]:
         return None
     return trim(p[1:])
 
-
+# Try to divide by a known linear factor exactly.
 def poly_div_linear_exact(p: Poly, factor: Poly) -> Optional[Poly]:
     """Divide by b0+b1*alpha.  Return None if the division is not exact."""
 
@@ -120,7 +120,7 @@ def poly_div_linear_exact(p: Poly, factor: Poly) -> Optional[Poly]:
         return trim(quotient)
     return None
 
-
+# RatPoly stores exact rational functions in alpha
 @dataclass(frozen=True)
 class RatPoly:
     """A rational function with denominator alpha^da(1+3a)^ds(1+2a)^dg."""
@@ -140,6 +140,8 @@ class RatPoly:
         self._cancel_denominator_factors()
 
     def _cancel_denominator_factors(self) -> None:
+        # Whenever the numerator contains alpha, sigma, or gamma as a factor,
+        # simplify the common factor from the numerator and denominator.
         num, da, ds, dg = self.num, self.da, self.ds, self.dg
         changed = True
         while changed and num:
@@ -164,15 +166,18 @@ class RatPoly:
         object.__setattr__(self, "ds", ds)
         object.__setattr__(self, "dg", dg)
 
+    # Build a constant rational function.
     @staticmethod
     def const(value: Fraction | int) -> "RatPoly":
         value = Fraction(value)
         return RatPoly((value,) if value else ZERO_POLY)
 
+    # Build the function equal to alpha.
     @staticmethod
     def alpha() -> "RatPoly":
         return RatPoly(ALPHA_POLY)
 
+    # Empty numerator is equivalent to the zero function.
     def is_zero(self) -> bool:
         return not self.num
 

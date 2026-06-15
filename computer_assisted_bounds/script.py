@@ -10,6 +10,7 @@ from lemmas import bernstein_bounds, set_verbose, substituting_estimates
 
 
 def print_time(total_seconds):
+    """Format a raw number of seconds as hours/minutes/seconds for printing."""
     hours = int(total_seconds // 3600)
     minutes_left = total_seconds - 3600 * hours
     minutes = int(minutes_left // 60)
@@ -24,6 +25,12 @@ def print_time(total_seconds):
 
 
 def print_lemma(verified, lemma_label, bounds, elapsed):
+    """Print the result of one lemma/table verification.
+
+    ``bounds`` is the list of constants loaded from
+    ``supplementary_data/bounds.txt``.  They are only printed when verbose mode
+    is enabled.
+    """
     print("")
     status = "OK" if verified else "FAIL"
     print(f"{lemma_label}: {status}.")
@@ -39,6 +46,7 @@ def print_lemma(verified, lemma_label, bounds, elapsed):
 
 
 def print_subst(verified, description):
+    """Print whether the bound-label substitution sanity check passed."""
     if verified:
         print("Every substitution is OK.")
     else:
@@ -46,6 +54,11 @@ def print_subst(verified, description):
 
 
 def run_block(block):
+    """
+    Each function in ``block`` must return ``(verified, lemma_label, bounds)``.
+    This wrapper times each function, prints a standardized result, and keeps
+    only the names of the failed checks.
+    """
     failures = []
     for lemma in block:
         start = perf_counter()
@@ -58,12 +71,14 @@ def run_block(block):
 
 
 def run_substitutions():
+    """Run the final sanity check that all referenced table-bound labels exist."""
     verified, description = substituting_estimates()
     print_subst(verified, description)
     return verified
 
 
 def parse_args():
+    """Parse command-line options."""
     parser = argparse.ArgumentParser(
         description="Reproduce the interval-arithmetic checks for Table bb."
     )
@@ -83,6 +98,7 @@ def parse_args():
 
 
 def main():
+    """Configure verbosity, run the proof block, and choose the process exit code."""
     args = parse_args()
     verbose_level = max(parameters.VERBOSE, int(args.verbose or 0))
     print_subintervals = bool(args.print_subintervals or verbose_level >= 2)

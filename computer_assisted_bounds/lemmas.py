@@ -1,11 +1,10 @@
-#!/usr/bin/env python
-# coding: utf-8
+
 r"""Lemma-level interval verification for Table~\ref{table:bb}.
 
-The public routine ``bernstein_bounds()`` corresponds to the paper statement
+The routine ``bernstein_bounds()`` corresponds to the paper statement
 Lemma~\ref{lemma:Bernstein:q} / Table~\ref{table:bb}.  The file is
 self-contained apart from the parameters in ``parameters.py``
-and the rounded constants in ``supplementary_data/bounds.txt``.
+and the constants in ``supplementary_data/bounds.txt``.
 """
 
 from __future__ import annotations
@@ -28,7 +27,8 @@ from parameters import (
     PROGRESS_EVERY,
 )
 
-
+########################################
+#Set the verbosity from parameters.py
 
 def set_verbose(level: int = 1, *, print_subintervals=None) -> None:
     """Set runtime verbosity from script.py."""
@@ -36,12 +36,15 @@ def set_verbose(level: int = 1, *, print_subintervals=None) -> None:
     if print_subintervals is not None:
         parameters.PRINT_SUBINTERVALS = bool(print_subintervals)
 
+########################################
+#Sanity check to verify no RBF has unresolved uncertainty.
 
 def o(x: Any) -> bool:
     """Return True when Sage did not print an uncertainty marker for x."""
     return "?" not in str(x)
 
-
+########################################
+# Progress printer (if the verbosity requires it)
 def print_iter_N(index, total=None, text="") -> None:
     if not parameters.VERBOSE:
         return
@@ -50,7 +53,8 @@ def print_iter_N(index, total=None, text="") -> None:
     else:
         print(f"  [{index}/{total}] {text}", flush=True)
 
-
+########################################
+# Import the bounds from supplementary_data/bounds.txt.
 def load_bounds(path=None):
     """Load supplementary_data/bounds.txt.
 
@@ -99,7 +103,9 @@ def load_bounds(path=None):
 
     return bounds, bounds_str, metadata
 
-
+#####################################
+# Detailed printer for accepted boxes.  It reports the local interval
+# enclosure and the difference from the requested lower/upper table bounds.
 def _print_local_box(problem, box, value, method, lower_bound, upper_bound) -> None:
     """Verbose debugging output for one accepted subinterval.
 
@@ -122,9 +128,15 @@ def _print_local_box(problem, box, value, method, lower_bound, upper_bound) -> N
         flush=True,
     )
 
-
+#################################################
+# Load all table constants.  BOUNDS contains Sage RBF values;
+# BOUNDS_STR keeps the original decimal strings for printing output
+# BOUNDS_META contains the metadata relative to the bound.
 BOUNDS, BOUNDS_STR, BOUNDS_META = load_bounds()
 
+################################################
+# To avoid accidental rounding from Python floats
+# all endpoints and constants are converted exactly to rationals.
 def to_QQ(x: Any) -> Any:
     """Convert int / Decimal / 'a/b' string / decimal string to Sage QQ exactly.
     """
@@ -146,7 +158,8 @@ def to_QQ(x: Any) -> Any:
     n, den = d.as_integer_ratio()
     return QQ(n) / QQ(den)
 
-
+#################################################
+# Convert a Sage rational back to text for the printing output.
 def qq_to_str(q: Any) -> str:
     return str(QQ(q))
 
@@ -154,7 +167,8 @@ def qq_to_str(q: Any) -> str:
 # ---------------------------------------------------------------------------
 # Ball arithmetic context (with per-evaluation cache for Shared nodes)
 # ---------------------------------------------------------------------------
-
+#################################
+# Context that owns the RBF parameters and a cache for shared subexpressions.
 class Context:
     """Holds the working RealBallField/RealIntervalField and a per-pass cache.
 
@@ -181,7 +195,8 @@ class Context:
     def ball_point(self, x: Any) -> Any:
         return self.RBF(to_QQ(x))
 
-
+###################################
+# Convenience wrappers that return Sage interval endpoints.
 def lower(x: Any) -> Any:
     return x.lower()
 
@@ -189,7 +204,8 @@ def lower(x: Any) -> Any:
 def upper(x: Any) -> Any:
     return x.upper()
 
-
+###################################
+# Helpers that check the sign of a given RBF.
 def strictly_positive(x: Any) -> bool:
     return bool(lower(x) > 0)
 
@@ -198,26 +214,12 @@ def nonnegative(x: Any) -> bool:
     return bool(lower(x) >= 0)
 
 
-def enclosure_width(x: Any) -> Any:
-    """Return an interval/ball enclosure width as a Sage real value.
-    """
-    return upper(x) - lower(x)
 
 
-def tighter_result(first: "EvalResult", second: "EvalResult") -> "EvalResult":
-    """Choose the narrower of two successful positive enclosures."""
-    try:
-        if bool(enclosure_width(second.value) < enclosure_width(first.value)):
-            return second
-    except Exception:
-        pass
-    return first
-
-
-# ---------------------------------------------------------------------------
-# Expression DSL with automatic differentiation
-# ---------------------------------------------------------------------------
-
+##############################################
+# In this class formulas are converted into expression trees; each expression
+# is evaluated using interval arithmetic and can be automatically
+# differentiated.
 class Expr:
     def __add__(self, other): return Add(self, as_expr(other))
     def __radd__(self, other): return Add(as_expr(other), self)
@@ -239,7 +241,11 @@ class Expr:
     def eval_ad(self, x, ctx, want_derivative):
         raise NotImplementedError
 
-
+##############################################
+# Constant node in the expression tree.
+#Transforms a given rational number into a node of the expression tree,
+#treating the constant as an exact RBF element. If want_derivative, it returns
+# zero (that is the derivative of a constant is zero)
 @dataclass(frozen=True)
 class Const(Expr):
     q: Any
@@ -255,10 +261,12 @@ class Const(Expr):
     def __str__(self):
         return qq_to_str(self.q)
 
-
+##############################################
+# Variable node in the expression tree. Given the RBF element x
+# as an input it returns x. If want_derivative, it returns 1.
 @dataclass(frozen=True)
 class Var(Expr):
-    name: str = "alpha"
+    name: str
 
     def eval_ad(self, x, ctx, want_derivative):
         der = ctx.RBF(1) if want_derivative else None
@@ -267,39 +275,9 @@ class Var(Expr):
     def __str__(self):
         return self.name
 
-
-@dataclass(frozen=True)
-class PolyExpr(Expr):
-    coeffs: Tuple[Any, ...]
-    label: Optional[str] = None
-
-    def __post_init__(self):
-        coeffs = tuple(to_QQ(c) for c in self.coeffs)
-        coeffs = trim_coeffs(coeffs)
-        object.__setattr__(self, "coeffs", coeffs)
-
-    def derivative_coeffs(self) -> Tuple[Any, ...]:
-        if len(self.coeffs) <= 1:
-            return (QQ(0),)
-        return tuple(QQ(i) * self.coeffs[i] for i in range(1, len(self.coeffs)))
-
-    def eval_poly(self, coeffs, x, ctx):
-        y = ctx.RBF(0)
-        for c in reversed(coeffs):
-            y = y * x + ctx.RBF(c)
-        return y
-
-    def eval_ad(self, x, ctx, want_derivative):
-        val = self.eval_poly(self.coeffs, x, ctx)
-        der = self.eval_poly(self.derivative_coeffs(), x, ctx) if want_derivative else None
-        return True, val, der, ""
-
-    def __str__(self):
-        if self.label:
-            return self.label
-        return "poly(" + repr([qq_to_str(c) for c in self.coeffs]) + ")"
-
-
+##############################################
+# Addition node in the expression tree.
+# The value and derivatives are combined term-by-term.
 @dataclass(frozen=True)
 class Add(Expr):
     left: Expr
@@ -319,7 +297,9 @@ class Add(Expr):
     def __str__(self):
         return f"({self.left} + {self.right})"
 
-
+##############################################
+# Multiplication node in the expression tree.
+# The derivative is computed from Leibniz rule.
 @dataclass(frozen=True)
 class Mul(Expr):
     left: Expr
@@ -339,7 +319,10 @@ class Mul(Expr):
     def __str__(self):
         return f"({self.left}*{self.right})"
 
-
+##############################################
+# Division node in the expression tree.
+# Before dividing the denominator is verified
+# away from zero
 @dataclass(frozen=True)
 class Div(Expr):
     numerator: Expr
@@ -361,7 +344,9 @@ class Div(Expr):
     def __str__(self):
         return f"({self.numerator}/{self.denominator})"
 
-
+##############################################
+# Power node in the expression tree.
+# Only allows nonnegative integer powers
 @dataclass(frozen=True)
 class Pow(Expr):
     base: Expr
@@ -382,7 +367,9 @@ class Pow(Expr):
     def __str__(self):
         return f"({self.base}**{self.n})"
 
-
+##############################################
+# Square-root node. For evaluation, the radicand
+# must be nonnegative. For derivative evaluation, it must be strictly positive.
 @dataclass(frozen=True)
 class Sqrt(Expr):
     arg: Expr
@@ -410,6 +397,9 @@ class Sqrt(Expr):
             return f"sqrt[{self.label}]({self.arg})"
         return f"sqrt({self.arg})"
 
+##############################################
+# This node is used to cache repeated subexpressions
+# like cr or V2.
 
 class Shared(Expr):
     """Memoizing wrapper.
@@ -440,20 +430,16 @@ class Shared(Expr):
 ExprLike = Union[Expr, int, str]
 
 
-def trim_coeffs(coeffs: Tuple[Any, ...]) -> Tuple[Any, ...]:
-    data = list(coeffs)
-    if not data:
-        return (QQ(0),)
-    while len(data) > 1 and data[-1] == 0:
-        data.pop()
-    return tuple(data)
-
-
+##############################################
+# Helper that makes sure constants are converted to
+# the class Expr
 def as_expr(x: Any) -> Expr:
     if isinstance(x, Expr):
         return x
     return Const(x)
 
+##############################################
+# Helper to construct sqrt nodes
 
 def sqrt_expr(x: Any, label: Optional[str] = None) -> Expr:
     return Sqrt(as_expr(x), label=label)
@@ -463,33 +449,9 @@ def sqrt_expr(x: Any, label: Optional[str] = None) -> Expr:
 # Problem API used by config files
 # ---------------------------------------------------------------------------
 
-@dataclass
-class ProblemSpec:
-    name: str
-    expr: Expr
-    interval: Tuple[Any, Any]
-    sense: str = ">0"
-    cuts: List[Any] = field(default_factory=list)
-    options: Dict[str, Any] = field(default_factory=dict)
-    original_formula: Optional[str] = None
 
-    def normalized_expr(self) -> Expr:
-        s = self.sense.replace(" ", "")
-        if s in (">0", ">", "positive", "pos"):
-            return self.expr
-        if s in ("<0", "<", "negative", "neg"):
-            return -self.expr
-        raise ValueError(f"unsupported sense for {self.name}: {self.sense!r}. Use '>0' or '<0'.")
-
-    def theorem(self) -> str:
-        s = self.sense.replace(" ", "")
-        if s in (">0", ">", "positive", "pos"):
-            return f"{self.name}: expression > 0 on interval"
-        if s in ("<0", "<", "negative", "neg"):
-            return f"{self.name}: expression < 0 on interval"
-        return f"{self.name}: expression {self.sense} on interval"
-
-
+########################################
+#To build expressions
 class ProblemAPI:
     def __init__(self, default_interval: Optional[Sequence[Any]] = None):
         # The DSL is one-variable.  `alpha` is kept as the historical name,
@@ -503,42 +465,24 @@ class ProblemAPI:
     def const(self, q):
         return Const(q)
 
-    def poly(self, coeffs, label=None):
-        return PolyExpr(tuple(coeffs), label=label)
 
     def sqrt(self, x, label=None):
         return sqrt_expr(x, label=label)
 
     def shared(self, x, label=None):
         """Wrap a subexpression so its interval value is cached per box.
-
-        Use for expressions referenced many times (cr, V2, common sqrts).
         """
         e = as_expr(x)
         if isinstance(e, Shared):
             return e
         return Shared(e, label=label)
 
-    def problem(self, name, expr, *, interval=None, sense=">0",
-                cuts=None, options=None):
-        iv = tuple(interval) if interval is not None else self.default_interval
-        if iv is None or len(iv) != 2:
-            raise ValueError(f"Problem {name!r} needs an interval=[a,b] or global INTERVAL.")
-        e = as_expr(expr)
-        return ProblemSpec(
-            name=str(name),
-            expr=e,
-            interval=(iv[0], iv[1]),
-            sense=sense,
-            cuts=list(cuts or []),
-            options=dict(options or {}),
-            original_formula=str(e),
-        )
 
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
-
+##########################
+# Result object returned by direct, derivative, and Taylor evaluation routines.
 @dataclass
 class EvalResult:
     ok: bool
@@ -546,18 +490,19 @@ class EvalResult:
     method: str = "direct"
     reason: str = ""
 
-
+# Direct interval evaluation on either a point ball or an interval box.
 def eval_direct(expr: Expr, x: Any, ctx: Context) -> EvalResult:
     ctx.reset_cache()
     ok, val, _, reason = expr.eval_ad(x, ctx, want_derivative=False)
     return EvalResult(ok=ok, value=val, method="direct", reason=reason)
 
-
+# Evaluate a rigorous interval enclosure of the derivative on an interval.
 def eval_derivative(expr: Expr, x: Any, ctx: Context) -> EvalResult:
     ctx.reset_cache()
     ok, _, der, reason = expr.eval_ad(x, ctx, want_derivative=True)
     return EvalResult(ok=ok, value=der, method="derivative", reason=reason)
 
+# First-order Taylor enclosure: f([a,b]) is contained in f(mid) + ([-rho,rho])f'([a,b]).
 
 def eval_taylor1(expr: Expr, a: Any, b: Any, ctx: Context) -> EvalResult:
     a = to_QQ(a)
@@ -585,7 +530,8 @@ def eval_taylor1(expr: Expr, a: Any, b: Any, ctx: Context) -> EvalResult:
 # ---------------------------------------------------------------------------
 # Adaptive proof of the table bounds
 # ---------------------------------------------------------------------------
-
+# One closed subinterval of the original domain.  The depth records how many bisections
+# produced it.
 @dataclass(frozen=True)
 class Box:
     a: Any
@@ -596,7 +542,10 @@ class Box:
         m = (self.a + self.b) / 2
         return Box(self.a, m, self.depth + 1), Box(m, self.b, self.depth + 1)
 
-
+##############################################
+# Verification problem for one table row.
+# Contains one expression, the lower/upper bounds from bounds.txt,
+# and an interval.
 @dataclass(frozen=True)
 class BoundProblem:
     name: str
@@ -607,7 +556,10 @@ class BoundProblem:
     lower_label: str
     upper_label: str
 
-
+##############################################
+# Build the starting boxes by splitting the full interval at the configured cuts
+# (the cuts are configured in parameters). The cuts are not necessary and they
+# are just chosen for convenience/speed.
 def initial_boxes(interval: Sequence[Any], cuts: Sequence[Any]) -> List[Box]:
     a = to_QQ(interval[0])
     b = to_QQ(interval[1])
@@ -618,7 +570,10 @@ def initial_boxes(interval: Sequence[Any], cuts: Sequence[Any]) -> List[Box]:
         raise ValueError("cuts must lie inside the problem interval")
     return [Box(pts[i], pts[i + 1], 0) for i in range(len(pts) - 1)]
 
-
+##############################################
+# Conservative table-bound interpretation.  For a lower bound, use the upper
+# endpoint of its ball so the final inequality is strict. Similarly, for an
+# upper bound use its lower bound.
 def _bound_lower_threshold(bound):
     """Strict lower-table bound, interpreted safely from an RBF element."""
     return upper(bound)
@@ -628,14 +583,18 @@ def _bound_upper_threshold(bound):
     """Strict upper-table bound, interpreted safely from an RBF element."""
     return lower(bound)
 
+##############################################
+# Return True only when a computed enclosure lies strictly between the
+# requested lower and upper bounds from bounds.txt.
 
 def _inside_table_bounds(value, lower_bound, upper_bound) -> bool:
     return bool(
         lower(value) > _bound_lower_threshold(lower_bound)
         and upper(value) < _bound_upper_threshold(upper_bound)
     )
-
-
+##############################################
+# Try to prove one box using direct interval arithmetic; or
+# if that fails, Taylor enclosure.
 def _best_table_enclosure(
     expr: Expr,
     box: Box,
@@ -643,30 +602,29 @@ def _best_table_enclosure(
     lower_bound,
     upper_bound,
 ) -> EvalResult:
-    """Return a rigorous enclosure for one box if it proves the table row."""
+
+    # Method 1: evaluate the expression directly on the entire interval box.
+
     X = ctx.ball_interval(box.a, box.b)
     direct = eval_direct(expr, X, ctx)
-    direct_ok = (
+    if (
         direct.ok
         and direct.value is not None
         and _inside_table_bounds(direct.value, lower_bound, upper_bound)
-    )
+    ):
+        return direct
 
-
+    # Method 2: if direct evaluation failed, try a first-order
+    # Taylor enclosure: f(midpoint) + [-rho, rho] * f'([a,b]).
     taylor = eval_taylor1(expr, box.a, box.b, ctx)
-    taylor_ok = (
+    if (
         taylor.ok
         and taylor.value is not None
         and _inside_table_bounds(taylor.value, lower_bound, upper_bound)
-    )
-
-    if direct_ok and taylor_ok:
-        return tighter_result(direct, taylor)
-    if taylor_ok:
+    ):
         return taylor
-    if direct_ok:
-        return direct
 
+    # Neither method proved the desired bounds, return the failure.
     if taylor.ok and taylor.value is not None:
         return EvalResult(
             False,
@@ -683,7 +641,8 @@ def _best_table_enclosure(
         )
     return direct
 
-
+######################################################
+# Main loop that checks the bounds for a single Bernstein coefficient.
 def prove_table_row(
     problem: BoundProblem,
     *,
@@ -713,6 +672,9 @@ def prove_table_row(
     method_counts: Dict[str, int] = {}
     t0 = time.perf_counter()
 
+    #  A box is accepted if one enclosure method proves it;
+    #  otherwise it is split into two smaller boxes.
+
     while stack:
         if accepted_count + len(stack) > max_boxes:
             failures.append({"reason": "maximum number of boxes exceeded"})
@@ -734,6 +696,7 @@ def prove_table_row(
         )
 
         if result.ok and result.value is not None:
+            # This box is rigorously inside the desired table bounds.
             accepted_count += 1
             method_counts[result.method] = method_counts.get(result.method, 0) + 1
             lo = lower(result.value)
@@ -747,6 +710,8 @@ def prove_table_row(
             continue
 
         if box.depth >= max_depth:
+            # The interval is still inconclusive, but the allowed subdivision
+            # depth has been exhausted.
             failures.append({
                 "a": qq_to_str(box.a),
                 "b": qq_to_str(box.b),
@@ -757,7 +722,7 @@ def prove_table_row(
                 "upper": str(upper(result.value)) if result.value is not None else None,
             })
             continue
-
+        # The current box did not prove the bound yet, so bisect and retry each half
         left, right = box.bisect()
         stack.append(right)
         stack.append(left)
@@ -786,7 +751,9 @@ def prove_table_row(
 # ---------------------------------------------------------------------------
 # Explicit formulae for the six rescaled Bernstein coefficients
 # ---------------------------------------------------------------------------
-
+# Shared quantities used by every b5b* coefficient formula. We use the node
+# shared so in each subinterval the enclosures of such quantities
+# are cached
 def make_cr_and_V2(alpha, api):
     """Build cr(alpha) and V2(alpha).
 
@@ -839,7 +806,9 @@ def make_cr_and_V2(alpha, api):
 
 
 
-
+###############################
+# The coefficient \BB_0. Also alpha=b^2 and radicand
+# sqrt(6 + 12 * alpha) are cached.
 
 def b5b0(b, api):
     alpha = api.shared(b**2, label="alpha")
@@ -868,7 +837,8 @@ def b5b0(b, api):
         )
     )
 
-
+###############################
+# The coefficient \BB_1.
 def b5b1(b, api):
     alpha = api.shared(b**2, label="alpha")
     cr, V2 = make_cr_and_V2(alpha, api)
@@ -927,7 +897,8 @@ def b5b1(b, api):
         )
     )
 
-
+###############################
+# The coefficient \BB_2.
 def b5b2(b, api):
     alpha = api.shared(b**2, label="alpha")
     cr, V2 = make_cr_and_V2(alpha, api)
@@ -1047,6 +1018,8 @@ def b5b2(b, api):
     )
 
 
+###############################
+# The coefficient \BB_3.
 def b5b3(b, api):
     alpha = api.shared(b**2, label="alpha")
     cr, V2 = make_cr_and_V2(alpha, api)
@@ -1134,6 +1107,8 @@ def b5b3(b, api):
     )
 
 
+###############################
+# The coefficient \BB_4.
 def b5b4(b, api):
     alpha = api.shared(b**2, label="alpha")
     cr, V2 = make_cr_and_V2(alpha, api)
@@ -1231,6 +1206,8 @@ def b5b4(b, api):
     )
 
 
+###############################
+# The coefficient \BB_5.
 def b5b5(b, api):
     alpha = api.shared(b**2, label="alpha")
     cr, V2 = make_cr_and_V2(alpha, api)
@@ -1308,10 +1285,14 @@ def b5b5(b, api):
         )
     )
 
-
+##############################################
+# Build the six verification problems from the explicit functions
+# and the corresponding lower/upper bounds in bounds.txt.
 def _build_bernstein_problems() -> List[BoundProblem]:
     api = ProblemAPI(default_interval=B_INTERVAL)
     b = api.b
+    # Each entry says: internal name, printed LaTeX symbol, formula builder,
+    # lower-bound label, upper-bound label.
     entries = [
         ("b5b0", r"\tilde{\BB}_0", b5b0, "BB0_lower", "BB0_upper"),
         ("b5b1", r"\tilde{\BB}_1", b5b1, "BB1_lower", "BB1_upper"),
@@ -1333,7 +1314,9 @@ def _build_bernstein_problems() -> List[BoundProblem]:
         for name, symbol, formula, lower_label, upper_label in entries
     ]
 
-
+##############################################
+# Routine called by script.py.  It verifies the bounds for all six Bernstein coefficients
+#  and returns a success flag with the list of constants used.
 def bernstein_bounds():  # (Lemma \ref{lemma:Bernstein:q} and Table \ref{table:bb})
     """Verify the six two-sided bounds displayed in Table~\\ref{table:bb}."""
     lemma_label = r"Lemma~\ref{lemma:Bernstein:q} / Table~\ref{table:bb}"
@@ -1347,7 +1330,7 @@ def bernstein_bounds():  # (Lemma \ref{lemma:Bernstein:q} and Table \ref{table:b
         bound_labels.extend([lower_label, upper_label])
         lower_bound = BOUNDS[lower_label]
         upper_bound = BOUNDS[upper_label]
-
+        # Prove the current coefficient bounds.
         result = prove_table_row(
             problem,
             lower_bound=lower_bound,
@@ -1385,7 +1368,9 @@ def bernstein_bounds():  # (Lemma \ref{lemma:Bernstein:q} and Table \ref{table:b
     ]
     return verified, lemma_label, bounds
 
-
+##############################################
+# Sanity check: every label referenced by the generated problems must exist in
+# bounds.txt with the expected lower/upper side.
 def substituting_estimates():
     """Check that all table-bound labels used by the proof are present."""
     problems = _build_bernstein_problems()
