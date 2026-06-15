@@ -1,929 +1,641 @@
 #!/usr/bin/env python3
-"""Exact rational-cover verification for Lemma Bernstein:q.
+"""SymPy-style rational-cover verification for Lemma Bernstein:q.
 
-The script proves the sign of the six explosion-side Bernstein coefficients
-B_j from Lemma~Bernstein:q.  It starts from the phase-plane definitions of
-P_v, P_q and the quadratic barrier, derives the separately affine forms
-in
+The script verifies two ranges:
 
-    scaled_c = (1+3*alpha)c_r,   scaled_v = (1+3*alpha)V_2,   rr < 0,
+1. The small-alpha range 0 < alpha <= 10^(-2), using x=sqrt(alpha).
+2. One unified rational cover from 10^(-2) to 2.4143.  Since 2.4143 is slightly
+   larger than 1+sqrt(2), this covers the full interval up to 1+sqrt(2).
 
-and then checks a finite rational cover using exact rational arithmetic.
+The scaled variables are
+
+    C = (1+3 alpha)c_r,
+    Y = (1+3 alpha)V_2,
+    rr is the paper variable.
+
+In the explosion-side convention rr is negative.
 """
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# How this file is organized
+# ---------------------------------------------------------------------------
+# 1. Declare the symbols and the rational cover of [0,1+sqrt(2)].
+# 2. Use SymPy to derive the six Bernstein polynomials L_j.
+# 3. Store each L_j in a sparse/dense coefficient format that is quick to
+#    evaluate at rational box corners.
+# 4. Build rational boxes for C,Y,rr on each cover interval.
+# 5. Prove positivity by converting the polynomials in alpha to
+#    Bernstein form on each subinterval and checking that all such coefficients
+#    have positive lower bounds
+
+
 import argparse
 from dataclasses import dataclass
-from fractions import Fraction
 from functools import lru_cache
 from itertools import product
-from math import comb
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from time import perf_counter
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import sympy as sp
 
 
 # ---------------------------------------------------------------------------
-# One-variable polynomial in alpha arithmetic
-# ---------------------------------------------------------------------------
-# A polynomial is stored as a tuple of coefficients: (c0, c1, c2, ...) means c0+c1*alpha+c2*alpha^2+...
-Poly = Tuple[Fraction, ...]  # coefficients in increasing powers of alpha
-ZERO_POLY: Poly = ()
-ONE_POLY: Poly = (Fraction(1),)
-ALPHA_POLY: Poly = (Fraction(0), Fraction(1))
-SIGMA_POLY: Poly = (Fraction(1), Fraction(3))  # 1+3 alpha
-GAMMA_POLY: Poly = (Fraction(1), Fraction(2))  # 1+2 alpha
-
-# Remove trailing zero coefficients
-def trim(poly: Iterable[Fraction]) -> Poly:
-    out = tuple(Fraction(c) for c in poly)
-    n = len(out)
-    while n and out[n - 1] == 0:
-        n -= 1
-    return out[:n]
-
-# Polynomial addition
-def poly_add(p: Poly, q: Poly) -> Poly:
-    n = max(len(p), len(q))
-    out = [Fraction(0)] * n
-    for i in range(n):
-        out[i] = (p[i] if i < len(p) else 0) + (q[i] if i < len(q) else 0)
-    return trim(out)
-
-# Transform a pollynomial Poly into -Poly
-def poly_neg(p: Poly) -> Poly:
-    return tuple(-c for c in p)
-
-# Subtraction of polynomials
-def poly_sub(p: Poly, q: Poly) -> Poly:
-    return poly_add(p, poly_neg(q))
-
-# Multiplication of polynomials
-def poly_mul(p: Poly, q: Poly) -> Poly:
-    if not p or not q:
-        return ZERO_POLY
-    out = [Fraction(0)] * (len(p) + len(q) - 1)
-    for i, ci in enumerate(p):
-        if ci == 0:
-            continue
-        for j, cj in enumerate(q):
-            if cj:
-                out[i + j] += ci * cj
-    return trim(out)
-
-# Rescale a polynomial by a rational constant
-def poly_scale(p: Poly, c: Fraction | int) -> Poly:
-    c = Fraction(c)
-    if c == 0 or not p:
-        return ZERO_POLY
-    return trim(ci * c for ci in p)
-
-# Cache repeated powers of alpha, sigma=(1+3*alpha), and gamma=(1+2*alpha).
-@lru_cache(maxsize=None)
-def factor_power(name: str, exponent: int) -> Poly:
-    factor = {"a": ALPHA_POLY, "s": SIGMA_POLY, "g": GAMMA_POLY}[name]
-    out = ONE_POLY
-    for _ in range(exponent):
-        out = poly_mul(out, factor)
-    return out
-
-# Try to divide a polynomial by alpha exactly. Return None if alpha is not a factor.
-def poly_div_alpha_exact(p: Poly) -> Optional[Poly]:
-    p = trim(p)
-    if not p:
-        return ZERO_POLY
-    if p[0] != 0:
-        return None
-    return trim(p[1:])
-
-# Try to divide by a known linear factor exactly.
-def poly_div_linear_exact(p: Poly, factor: Poly) -> Optional[Poly]:
-    """Divide by b0+b1*alpha.  Return None if the division is not exact."""
-
-    p = trim(p)
-    if not p:
-        return ZERO_POLY
-    if len(p) == 1:
-        return None
-    b0, b1 = factor
-    degree = len(p) - 1
-    quotient = [Fraction(0)] * degree
-    remainder = list(p)
-    for k in range(degree - 1, -1, -1):
-        coeff = remainder[k + 1] / b1
-        quotient[k] = coeff
-        remainder[k + 1] -= b1 * coeff
-        remainder[k] -= b0 * coeff
-    if all(entry == 0 for entry in remainder):
-        return trim(quotient)
-    return None
-
-# RatPoly stores exact rational functions in alpha
-@dataclass(frozen=True)
-class RatPoly:
-    """A rational function with denominator alpha^da(1+3a)^ds(1+2a)^dg."""
-
-    num: Poly = ZERO_POLY
-    da: int = 0
-    ds: int = 0
-    dg: int = 0
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "num", trim(self.num))
-        if not self.num:
-            object.__setattr__(self, "da", 0)
-            object.__setattr__(self, "ds", 0)
-            object.__setattr__(self, "dg", 0)
-            return
-        self._cancel_denominator_factors()
-
-    def _cancel_denominator_factors(self) -> None:
-        # Whenever the numerator contains alpha, sigma, or gamma as a factor,
-        # simplify the common factor from the numerator and denominator.
-        num, da, ds, dg = self.num, self.da, self.ds, self.dg
-        changed = True
-        while changed and num:
-            changed = False
-            if da > 0:
-                q = poly_div_alpha_exact(num)
-                if q is not None:
-                    num, da, changed = q, da - 1, True
-                    continue
-            if ds > 0:
-                q = poly_div_linear_exact(num, SIGMA_POLY)
-                if q is not None:
-                    num, ds, changed = q, ds - 1, True
-                    continue
-            if dg > 0:
-                q = poly_div_linear_exact(num, GAMMA_POLY)
-                if q is not None:
-                    num, dg, changed = q, dg - 1, True
-                    continue
-        object.__setattr__(self, "num", num)
-        object.__setattr__(self, "da", da)
-        object.__setattr__(self, "ds", ds)
-        object.__setattr__(self, "dg", dg)
-
-    # Build a constant rational function.
-    @staticmethod
-    def const(value: Fraction | int) -> "RatPoly":
-        value = Fraction(value)
-        return RatPoly((value,) if value else ZERO_POLY)
-
-    # Build the function equal to alpha.
-    @staticmethod
-    def alpha() -> "RatPoly":
-        return RatPoly(ALPHA_POLY)
-
-    # Empty numerator is equivalent to the zero function.
-    def is_zero(self) -> bool:
-        return not self.num
-
-    def __neg__(self) -> "RatPoly":
-        return RatPoly(poly_neg(self.num), self.da, self.ds, self.dg)
-
-    def __add__(self, other: "RatPoly | Fraction | int") -> "RatPoly":
-        other = to_ratpoly(other)
-        if self.is_zero():
-            return other
-        if other.is_zero():
-            return self
-        da = max(self.da, other.da)
-        ds = max(self.ds, other.ds)
-        dg = max(self.dg, other.dg)
-        n1, n2 = self.num, other.num
-        if da > self.da:
-            n1 = poly_mul(n1, factor_power("a", da - self.da))
-        if ds > self.ds:
-            n1 = poly_mul(n1, factor_power("s", ds - self.ds))
-        if dg > self.dg:
-            n1 = poly_mul(n1, factor_power("g", dg - self.dg))
-        if da > other.da:
-            n2 = poly_mul(n2, factor_power("a", da - other.da))
-        if ds > other.ds:
-            n2 = poly_mul(n2, factor_power("s", ds - other.ds))
-        if dg > other.dg:
-            n2 = poly_mul(n2, factor_power("g", dg - other.dg))
-        return RatPoly(poly_add(n1, n2), da, ds, dg)
-
-    __radd__ = __add__
-
-    def __sub__(self, other: "RatPoly | Fraction | int") -> "RatPoly":
-        return self + (-to_ratpoly(other))
-
-    def __rsub__(self, other: "RatPoly | Fraction | int") -> "RatPoly":
-        return to_ratpoly(other) + (-self)
-
-    def __mul__(self, other: "RatPoly | Fraction | int") -> "RatPoly":
-        other = to_ratpoly(other)
-        if self.is_zero() or other.is_zero():
-            return RatPoly()
-        return RatPoly(poly_mul(self.num, other.num), self.da + other.da, self.ds + other.ds, self.dg + other.dg)
-
-    __rmul__ = __mul__
-
-    def scale(self, value: Fraction | int) -> "RatPoly":
-        return RatPoly(poly_scale(self.num, Fraction(value)), self.da, self.ds, self.dg)
-
-    def div_alpha(self, exponent: int = 1) -> "RatPoly":
-        return RatPoly(self.num, self.da + exponent, self.ds, self.dg)
-
-    def div_sigma(self, exponent: int = 1) -> "RatPoly":
-        return RatPoly(self.num, self.da, self.ds + exponent, self.dg)
-
-    def div_gamma(self, exponent: int = 1) -> "RatPoly":
-        return RatPoly(self.num, self.da, self.ds, self.dg + exponent)
-
-    def mul_alpha(self, exponent: int = 1) -> "RatPoly":
-        return RatPoly(poly_mul(self.num, factor_power("a", exponent)), self.da, self.ds, self.dg)
-
-    def mul_sigma(self, exponent: int = 1) -> "RatPoly":
-        return RatPoly(poly_mul(self.num, factor_power("s", exponent)), self.da, self.ds, self.dg)
-
-    def mul_gamma(self, exponent: int = 1) -> "RatPoly":
-        return RatPoly(poly_mul(self.num, factor_power("g", exponent)), self.da, self.ds, self.dg)
-
-    def as_poly_after_multiplication(self, const: int, alpha_power: int, sigma_power: int, gamma_power: int) -> Poly:
-        out = RatPoly(poly_scale(self.num, Fraction(const)), self.da, self.ds, self.dg)
-        if alpha_power:
-            out = out.mul_alpha(alpha_power)
-        if sigma_power:
-            out = out.mul_sigma(sigma_power)
-        if gamma_power:
-            out = out.mul_gamma(gamma_power)
-        if out.da or out.ds or out.dg:
-            raise ArithmeticError(f"remaining denominator alpha^{out.da} sigma^{out.ds} gamma^{out.dg}")
-        return out.num
-
-
-def to_ratpoly(value: RatPoly | Fraction | int) -> RatPoly:
-    if isinstance(value, RatPoly):
-        return value
-    return RatPoly.const(value)
-
-
-# ---------------------------------------------------------------------------
-# Normal-form arithmetic in scaled_c, scaled_v, and rr<0
+# Symbols and exact phase-plane definitions
 # ---------------------------------------------------------------------------
 
-BasisKey = Tuple[int, int, int]  # powers of scaled_c, scaled_v, rr
-NormalFormDict = Dict[BasisKey, RatPoly]
-PolynomialDict = Dict[BasisKey, Poly]
+# alpha is the parameter, and t is the barrier parameter.
+alpha, t = sp.symbols("alpha t")
 
-# scaled_c^2 = ((60a^2+33a-6) + (10-6a) scaled_c)/4.
-SCALED_C_SQUARE: NormalFormDict = {
-    (0, 0, 0): RatPoly((Fraction(-3, 2), Fraction(33, 4), Fraction(15))),
-    (1, 0, 0): RatPoly((Fraction(5, 2), Fraction(-3, 2))),
-}
+# C,Y,rr are the scaled algebraic variables.  V,Q are the phase-plane variables
+# used only while building the expressions from vector-fields.
+C, Y, rr = sp.symbols("C Y rr")
+V, Q = sp.symbols("V Q")
 
-# rr^2 = 6a/(25(1+2a)).
-RR_SQUARE = RatPoly(ALPHA_POLY, dg=1).scale(Fraction(6, 25))
-
-# The scaled_v^2 relation, with scaled_c^2 already reduced.
-SCALED_V_SQUARE: NormalFormDict = {
-    (0, 1, 0): RatPoly((Fraction(4), Fraction(1), Fraction(-6)), dg=1).scale(Fraction(1, 2)),
-    (1, 1, 0): RatPoly((Fraction(1), Fraction(6)), dg=1).scale(Fraction(1, 2)),
-    (0, 0, 0): SCALED_C_SQUARE[(0, 0, 0)].scale(2).div_gamma().scale(Fraction(1, 2)),
-    (1, 0, 0): (SCALED_C_SQUARE[(1, 0, 0)].scale(2) - RatPoly((Fraction(5), Fraction(6)))).div_gamma().scale(Fraction(1, 2)),
-}
-
-
-@lru_cache(maxsize=None)
-def reduce_monomial(c_power: int, v_power: int, rr_power: int) -> NormalFormDict:
-    if rr_power >= 2:
-        return {key: value * RR_SQUARE for key, value in reduce_monomial(c_power, v_power, rr_power - 2).items()}
-    if c_power >= 2:
-        out: NormalFormDict = {}
-        for (dc, dv, dr), coeff in SCALED_C_SQUARE.items():
-            for key, value in reduce_monomial(c_power - 2 + dc, v_power + dv, rr_power + dr).items():
-                out[key] = out.get(key, RatPoly()) + coeff * value
-        return {key: value for key, value in out.items() if not value.is_zero()}
-    if v_power >= 2:
-        out = {}
-        for (dc, dv, dr), coeff in SCALED_V_SQUARE.items():
-            for key, value in reduce_monomial(c_power + dc, v_power - 2 + dv, rr_power + dr).items():
-                out[key] = out.get(key, RatPoly()) + coeff * value
-        return {key: value for key, value in out.items() if not value.is_zero()}
-    return {(c_power, v_power, rr_power): RatPoly.const(1)}
-
-
-class NormalForm:
-    __slots__ = ("data",)
-
-    def __init__(self, data: Optional[NormalFormDict] = None):
-        self.data: NormalFormDict = {}
-        if data:
-            for key, value in data.items():
-                value = to_ratpoly(value)
-                if not value.is_zero():
-                    self.data[key] = value
-
-    @staticmethod
-    def const(value: RatPoly | Fraction | int) -> "NormalForm":
-        return NormalForm({(0, 0, 0): to_ratpoly(value)})
-
-    def is_zero(self) -> bool:
-        return not self.data
-
-    def __neg__(self) -> "NormalForm":
-        return NormalForm({key: -value for key, value in self.data.items()})
-
-    def __add__(self, other: "NormalForm | RatPoly | Fraction | int") -> "NormalForm":
-        other = to_normalform(other)
-        out = dict(self.data)
-        for key, value in other.data.items():
-            out[key] = out.get(key, RatPoly()) + value
-        return NormalForm(out)
-
-    __radd__ = __add__
-
-    def __sub__(self, other: "NormalForm | RatPoly | Fraction | int") -> "NormalForm":
-        return self + (-to_normalform(other))
-
-    def __rsub__(self, other: "NormalForm | RatPoly | Fraction | int") -> "NormalForm":
-        return to_normalform(other) + (-self)
-
-    def __mul__(self, other: "NormalForm | RatPoly | Fraction | int") -> "NormalForm":
-        other = to_normalform(other)
-        out: NormalFormDict = {}
-        for (c1, v1, r1), coeff1 in self.data.items():
-            for (c2, v2, r2), coeff2 in other.data.items():
-                for key, reduction_coeff in reduce_monomial(c1 + c2, v1 + v2, r1 + r2).items():
-                    out[key] = out.get(key, RatPoly()) + coeff1 * coeff2 * reduction_coeff
-        return NormalForm(out)
-
-    __rmul__ = __mul__
-
-    def scale(self, value: Fraction | int) -> "NormalForm":
-        return NormalForm({key: coeff.scale(value) for key, coeff in self.data.items()})
-
-    def div_alpha(self) -> "NormalForm":
-        return NormalForm({key: coeff.div_alpha() for key, coeff in self.data.items()})
-
-    def div_sigma(self) -> "NormalForm":
-        return NormalForm({key: coeff.div_sigma() for key, coeff in self.data.items()})
-
-    def div_gamma(self) -> "NormalForm":
-        return NormalForm({key: coeff.div_gamma() for key, coeff in self.data.items()})
-
-    def as_polynomial_dict_after_multiplication(self, const: int, alpha_power: int, sigma_power: int, gamma_power: int) -> PolynomialDict:
-        return {
-            key: coeff.as_poly_after_multiplication(const, alpha_power, sigma_power, gamma_power)
-            for key, coeff in self.data.items()
-        }
-
-
-def to_normalform(value: NormalForm | RatPoly | Fraction | int) -> NormalForm:
-    if isinstance(value, NormalForm):
-        return value
-    return NormalForm.const(value)
-
-
-ZERO_NF = NormalForm()
-ONE_NF = NormalForm.const(1)
-ALPHA_NF = NormalForm.const(RatPoly.alpha())
-SCALED_C_NF = NormalForm({(1, 0, 0): RatPoly.const(1)})
-SCALED_V_NF = NormalForm({(0, 1, 0): RatPoly.const(1)})
-RR_NF = NormalForm({(0, 0, 1): RatPoly.const(1)})
-SIGMA_NF = NormalForm.const(RatPoly(SIGMA_POLY))
-
-
-# ---------------------------------------------------------------------------
-# Polynomial arithmetic in t with normal-form coefficients
-# ---------------------------------------------------------------------------
-
-NFPoly = List[NormalForm]
-
-
-def nfpoly_trim(poly: NFPoly) -> NFPoly:
-    while poly and poly[-1].is_zero():
-        poly.pop()
-    return poly
-
-
-def nfpoly_add(p: NFPoly, q: NFPoly) -> NFPoly:
-    n = max(len(p), len(q))
-    out = []
-    for i in range(n):
-        out.append((p[i] if i < len(p) else ZERO_NF) + (q[i] if i < len(q) else ZERO_NF))
-    return nfpoly_trim(out)
-
-
-def nfpoly_neg(p: NFPoly) -> NFPoly:
-    return [-entry for entry in p]
-
-
-def nfpoly_sub(p: NFPoly, q: NFPoly) -> NFPoly:
-    return nfpoly_add(p, nfpoly_neg(q))
-
-
-def nfpoly_mul(p: NFPoly, q: NFPoly) -> NFPoly:
-    if not p or not q:
-        return []
-    out = [ZERO_NF for _ in range(len(p) + len(q) - 1)]
-    for i, pi in enumerate(p):
-        if pi.is_zero():
-            continue
-        for j, qj in enumerate(q):
-            if qj.is_zero():
-                continue
-            out[i + j] = out[i + j] + pi * qj
-    return nfpoly_trim(out)
-
-
-def nfpoly_shift(p: NFPoly, shift: int) -> NFPoly:
-    return [ZERO_NF] * shift + p
-
-
-def nfpoly_scale(p: NFPoly, scalar: NormalForm | RatPoly | Fraction | int) -> NFPoly:
-    scalar = to_normalform(scalar)
-    return [entry * scalar for entry in p]
-
-
-def nfpoly_derivative(p: NFPoly) -> NFPoly:
-    return [p[i].scale(i) for i in range(1, len(p))]
-
-
-def nfpoly_power(p: NFPoly, exponent: int) -> NFPoly:
-    out = [ONE_NF]
-    for _ in range(exponent):
-        out = nfpoly_mul(out, p)
-    return out
-
-
-def build_normal_forms(verbose: bool = False) -> List[PolynomialDict]:
-    """Derive the six normal forms from the phase-plane definitions."""
-
-    c_r = SCALED_C_NF.div_sigma()
-    V_2 = SCALED_V_NF.div_sigma()
-    Q_2 = (SCALED_C_NF - SCALED_V_NF).div_alpha().div_sigma()
-    c_b = (SCALED_C_NF - ONE_NF).div_sigma()
-
-    # F(t)=V_2 t^2 + Q_2 rr(t-t^2), with rr=rr<0.
-    F_poly = nfpoly_add(
-        nfpoly_shift([V_2], 2),
-        nfpoly_mul(nfpoly_shift([Q_2 * RR_NF], 1), [ONE_NF, -ONE_NF]),
-    )
-    Q_poly = nfpoly_shift([Q_2], 1)
-
-    V_minus_cr = nfpoly_sub(F_poly, [c_r])
-    sigma_V_minus_one = nfpoly_sub(nfpoly_scale(F_poly, SIGMA_NF), [ONE_NF])
-    V_minus_one = nfpoly_sub(F_poly, [ONE_NF])
-    Q_square = nfpoly_power(Q_poly, 2)
-
-    bracket_q = nfpoly_add(
-        nfpoly_add(
-            nfpoly_neg(nfpoly_mul(nfpoly_power(V_minus_cr, 2), sigma_V_minus_one)),
-            nfpoly_scale(
-                nfpoly_mul(V_minus_cr, nfpoly_add(nfpoly_mul(F_poly, V_minus_one), nfpoly_scale(Q_square, ALPHA_NF))),
-                ALPHA_NF,
-            ),
-        ),
-        nfpoly_scale(Q_square, NormalForm.const(RatPoly(ALPHA_POLY).mul_alpha().div_gamma()) * c_b),
-    )
-
-    # Since P_q=Q_2 t * bracket_q, the quotient P_q/Q_2 is t*bracket_q.
-    Pq_over_Q2 = nfpoly_shift(bracket_q, 1)
-
-    Pv_inner = nfpoly_add(
-        nfpoly_neg(nfpoly_mul(nfpoly_mul(F_poly, V_minus_one), V_minus_cr)),
-        nfpoly_scale(Q_square, ALPHA_NF * (c_r - c_b.div_gamma() - ONE_NF)),
-    )
-    Pv_inner = nfpoly_add(
-        Pv_inner,
-        nfpoly_scale(nfpoly_mul(Q_square, F_poly), NormalForm.const(RatPoly(ALPHA_POLY).mul_alpha().scale(3))),
-    )
-    Pv = nfpoly_mul(V_minus_cr, Pv_inner)
-    B_poly = nfpoly_sub(Pv, nfpoly_mul(nfpoly_derivative(F_poly), Pq_over_Q2))
-
-    # B(t)=t^2(1-t)Q(t).  Recover the six power coefficients of Q recursively.
-    q_coefficients: List[NormalForm] = []
-    for j in range(6):
-        coeff = B_poly[j + 2] if j + 2 < len(B_poly) else ZERO_NF
-        if j:
-            coeff = coeff + q_coefficients[-1]
-        q_coefficients.append(coeff)
-
-    if len(B_poly) > 8 and any(not entry.is_zero() for entry in B_poly[9:]):
-        raise ArithmeticError("unexpected degree after division by t^2(1-t)")
-    high_check = (B_poly[8] if len(B_poly) > 8 else ZERO_NF) + q_coefficients[-1]
-    if not high_check.is_zero():
-        raise ArithmeticError("division by t^2(1-t) failed in the top coefficient")
-
-    # d_j(alpha) values are const*alpha^p*(1+3alpha)^q*(1+2alpha)^r.
-    denominators = [
-        (200, 1, 5, 2),
-        (20000, 2, 5, 4),
-        (200000, 3, 5, 7),
-        (400000, 4, 5, 4),
-        (40000, 3, 5, 6),
-        (800, 2, 5, 6),
-    ]
-
-    normal_forms: List[PolynomialDict] = []
-    for j in range(6):
-        bernstein_coeff = ZERO_NF
-        for i in range(j + 1):
-            bernstein_coeff = bernstein_coeff + q_coefficients[i].scale(Fraction(comb(j, i), comb(5, i)))
-        const, alpha_power, sigma_power, gamma_power = denominators[j]
-        normal_form = (-bernstein_coeff).as_polynomial_dict_after_multiplication(
-            const, alpha_power, sigma_power, gamma_power
-        )
-        normal_forms.append(normal_form)
-
-    if verbose:
-        for j, form in enumerate(normal_forms):
-            max_degree = max(len(poly) for poly in form.values()) - 1
-            print(f"normal form {j}: {len(form)} monomial terms, max alpha degree {max_degree}")
-    return normal_forms
-
-
-# ---------------------------------------------------------------------------
-# Bernstein conversion and rational-cover checks
-# ---------------------------------------------------------------------------
-
-alpha_symbol = sp.symbols("alpha")
+# The rational cover ends at 2.4143, slightly larger than 1 + sp.sqrt(2).
 TRUE_ENDPOINT = 1 + sp.sqrt(2)
-RATIONAL_ENDPOINT = Fraction(24143, 10000)
+RATIONAL_ENDPOINT = sp.Rational(24143, 10000)
+assert RATIONAL_ENDPOINT > TRUE_ENDPOINT
 
 
 @dataclass(frozen=True)
 class CoverInterval:
+    """One closed interval in the rational alpha-cover."""
+
     left: str
     right: str
 
     @property
-    def a0(self) -> Fraction:
-        return Fraction(self.left)
+    def a0(self) -> sp.Rational:
+        return sp.Rational(self.left)
 
     @property
-    def a1(self) -> Fraction:
-        return Fraction(self.right)
+    def a1(self) -> sp.Rational:
+        return sp.Rational(self.right)
 
     def tex_interval(self) -> str:
         return f"[{self.left},{self.right}]"
 
 
-BASE_COVER: Tuple[CoverInterval, ...] = tuple(
-    CoverInterval(a, b)
-    for a, b in [
-        ("0.0100", "0.0476"),
-        ("0.0476", "0.0997"),
-        ("0.0997", "0.1233"),
-        ("0.1233", "0.1436"),
-        ("0.1436", "0.1638"),
-        ("0.1638", "0.1858"),
-        ("0.1858", "0.2116"),
-        ("0.2116", "0.2435"),
-        ("0.2435", "0.2765"),
-        ("0.2765", "0.3047"),
-        ("0.3047", "0.3294"),
-        ("0.3294", "0.3517"),
-        ("0.3517", "0.3726"),
-        ("0.3726", "0.3919"),
-        ("0.3919", "0.4091"),
-        ("0.4091", "0.4247"),
-        ("0.4247", "0.4394"),
-        ("0.4394", "0.4537"),
-        ("0.4537", "0.4679"),
-        ("0.4679", "0.4823"),
-        ("0.4823", "0.4971"),
-        ("0.4971", "0.5124"),
-        ("0.5124", "0.5285"),
-        ("0.5285", "0.5455"),
-        ("0.5455", "0.5546"),
-        ("0.5546", "0.5637"),
-        ("0.5637", "0.5832"),
-        ("0.5832", "0.6042"),
-        ("0.6042", "0.6269"),
-        ("0.6269", "0.6516"),
-        ("0.6516", "0.6785"),
-        ("0.6785", "0.7078"),
-        ("0.7078", "0.7398"),
-        ("0.7398", "0.7748"),
-        ("0.7748", "0.8131"),
-        ("0.8131", "0.8549"),
-        ("0.8549", "0.9006"),
-        ("0.9006", "0.9504"),
-        ("0.9504", "1.0000"),
-    ]
+@dataclass(frozen=True)
+class CoverResult:
+    """Data recorded for one certified interval check."""
+
+    idx: int
+    interval: CoverInterval
+    minimum: sp.Rational
+    coefficient_j: int
+    C_bounds: Tuple[sp.Rational, sp.Rational]
+    Y_bounds: Tuple[sp.Rational, sp.Rational]
+    rr_bounds: Tuple[sp.Rational, sp.Rational]
+
+
+# The rational cover of [0, 1+sqrt[2]].
+COVER_ENDPOINTS: Tuple[str, ...] = (
+    "0.0100", "0.0476", "0.0997", "0.1233", "0.1436", "0.1638",
+    "0.1858", "0.2116", "0.2435", "0.2765", "0.3047", "0.3294",
+    "0.3517", "0.3726", "0.3919", "0.4091", "0.4247", "0.4394",
+    "0.4537", "0.4679", "0.4823", "0.4971", "0.5124", "0.5285",
+    "0.5455", "0.5546", "0.5637", "0.5832", "0.6042", "0.6269",
+    "0.6516", "0.6785", "0.7078", "0.7398", "0.7748", "0.8131",
+    "0.8549", "0.9006", "0.9504", "1.0000", "1.0569", "1.1111",
+    "1.1630", "1.2129", "1.2610", "1.3075", "1.3525", "1.3962",
+    "1.4386", "1.4799", "1.5202", "1.5596", "1.5981", "1.6358",
+    "1.6728", "1.7091", "1.7447", "1.7797", "1.8141", "1.8480",
+    "1.8814", "1.9143", "1.9467", "1.9787", "2.0103", "2.0415",
+    "2.0723", "2.1027", "2.1328", "2.1625", "2.1919", "2.2210",
+    "2.2498", "2.2783", "2.3066", "2.3346", "2.3624", "2.3899",
+    "2.4143",
 )
 
-EXTENSION_ENDPOINTS = [
-    "1.0000", "1.0569", "1.1111", "1.1630", "1.2129", "1.2610", "1.3075",
-    "1.3525", "1.3962", "1.4386", "1.4799", "1.5202", "1.5596", "1.5981",
-    "1.6358", "1.6728", "1.7091", "1.7447", "1.7797", "1.8141", "1.8480",
-    "1.8814", "1.9143", "1.9467", "1.9787", "2.0103", "2.0415", "2.0723",
-    "2.1027", "2.1328", "2.1625", "2.1919", "2.2210", "2.2498", "2.2783",
-    "2.3066", "2.3346", "2.3624", "2.3899", "2.4143",
-]
-
-EXTENSION_COVER: Tuple[CoverInterval, ...] = tuple(
-    CoverInterval(EXTENSION_ENDPOINTS[i], EXTENSION_ENDPOINTS[i + 1])
-    for i in range(len(EXTENSION_ENDPOINTS) - 1)
+COVER: Tuple[CoverInterval, ...] = tuple(
+    CoverInterval(COVER_ENDPOINTS[i], COVER_ENDPOINTS[i + 1])
+    for i in range(len(COVER_ENDPOINTS) - 1)
 )
 
 
-def full_cover() -> Tuple[CoverInterval, ...]:
-    return BASE_COVER + EXTENSION_COVER
+# ---------------------------------------------------------------------------
+# Derive the six L_j polynomials with SymPy
+# ---------------------------------------------------------------------------
 
 
-def fraction_to_sympy(q: Fraction) -> sp.Rational:
-    return sp.Rational(q.numerator, q.denominator)
+def build_L_expressions(verbose: bool = False) -> List[sp.Expr]:
+    """Return the six multi-affine polynomials L_j(alpha,C,Y,rr).
 
+    The definitions are those of the explosion-side barrier calculation.  SymPy
+    builds the expression B(t), reduces it modulo the algebraic identities for
+    C,Y,rr, divides by t^2(1-t), converts the resulting quintic from the power
+    basis to the Bernstein basis, and multiplies by the D_j factors.
+    """
 
-def fraction_from_sympy(q: sp.Rational) -> Fraction:
-    return Fraction(int(q.p), int(q.q))
+    a = alpha
+    gamma = 1 + 2 * a
 
+    # Convert scaled variables back to the variables used in the phase-plane
+    # vector field formulas.
+    cr = C / (1 + 3 * a)
+    V2 = Y / (1 + 3 * a)
+    Q2 = (cr - V2) / a
+    cb = cr - 1 / (1 + 3 * a)
 
-@lru_cache(maxsize=None)
-def scaled_c_value(a: Fraction) -> sp.Expr:
-    x = fraction_to_sympy(a)
-    return (sp.Rational(5) - 3 * x + sp.sqrt(1 + 102 * x + 249 * x**2)) / 4
-
-
-@lru_cache(maxsize=None)
-def scaled_v_value(a: Fraction) -> sp.Expr:
-    x = fraction_to_sympy(a)
-    scaled_c = scaled_c_value(a)
-    c_r = scaled_c / (1 + 3 * x)
-    gamma = 1 + 2 * x
-    V_1 = (sp.Rational(3) / (1 + 3 * x) + 2 - 2 * c_r) / (3 * gamma)
-    V_2 = sp.Rational(1, 4) * (
-        -1 + 3 * c_r + 3 * V_1 - sp.sqrt((1 - 3 * c_r - 3 * V_1) ** 2 - 24 * c_r * V_1)
+    # Pq and Pv are the vector-field components on the explosion side.
+    Pq = Q * (
+        -(V - cr) ** 2 * (V * (1 + 3 * a) - 1)
+        + a * (V - cr) * (V * (V - 1) + a * Q**2)
+        + a**2 * cb / gamma * Q**2
     )
-    return (1 + 3 * x) * V_2
+    Pv = (V - cr) * (
+        -V * (V - 1) * (V - cr)
+        + a * Q**2 * (cr - cb / gamma - 1 + 3 * a * V)
+    )
+
+    # Quadratic barrier path F(t).  B is the barrier comparison expression.
+    F = V2 * t**2 + Q2 * rr * (t - t**2)
+    B = Pv.subs({V: F, Q: Q2 * t}) - sp.diff(F, t) / Q2 * Pq.subs(
+        {V: F, Q: Q2 * t}
+    )
+
+    # We start working with the numerator of B.
+    B_num, B_den = sp.fraction(sp.cancel(B))
+
+    # We collect the identities solved by rr, C, Y.
+    relations = [
+        4 * C**2 + (6 * a - 10) * C - 60 * a**2 - 33 * a + 6,
+        (4 * a + 2) * Y**2
+        + (-6 * a * C - C + 6 * a**2 - a - 4) * Y
+        - 2 * C**2
+        + 6 * a * C
+        + 5 * C,
+        25 * (1 + 2 * a) * rr**2 - 6 * a,
+    ]
+
+    # We will use G to reduce factors of rr^2, Y^2 and C^2 using the relations
+    # above
+    G = sp.groebner(relations, rr, Y, C, order="lex", domain=sp.QQ.frac_field(a))
+
+    # Reduce each t coefficient of B modulo the Groebner basis (one at a time).
+    B_poly = sp.Poly(B_num, t)
+    reduced_B_num = 0
+    for k in range(B_poly.degree() + 1):
+        coeff = B_poly.coeff_monomial(t**k)
+        if coeff:
+            reduced_B_num += G.reduce(coeff)[1] * t**k
+
+    # B(t) is divisible by t^2(1-t).  The remaining
+    # quotient Q_reduced is the degree-five polynomial whose Bernstein
+    # coefficients are checked.
+    Q_reduced = sp.cancel(reduced_B_num / (t**2 * (1 - t) * B_den))
+    Q_num, Q_den = sp.fraction(Q_reduced)
+    Q_poly = sp.Poly(Q_num, t)
+    q_coeffs = [sp.cancel(Q_poly.coeff_monomial(t**i) / Q_den) for i in range(6)]
+
+    # Compute Q(t) degree-5 Bernstein coefficients.
+    b_coeffs = []
+    for j in range(6):
+        bj = sum(
+            q_coeffs[i] * sp.binomial(j, i) / sp.binomial(5, i)
+            for i in range(j + 1)
+        )
+        b_coeffs.append(sp.cancel(bj))
+
+    # Positive denominator-clearing factors.
+    denominators = [
+        200 * a * (1 + 2 * a) ** 2 * (1 + 3 * a) ** 5,
+        20000 * a**2 * (1 + 2 * a) ** 4 * (1 + 3 * a) ** 5,
+        200000 * a**3 * (1 + 2 * a) ** 7 * (1 + 3 * a) ** 5,
+        400000 * a**4 * (1 + 2 * a) ** 4 * (1 + 3 * a) ** 5,
+        40000 * a**3 * (1 + 2 * a) ** 6 * (1 + 3 * a) ** 5,
+        800 * a**2 * (1 + 2 * a) ** 6 * (1 + 3 * a) ** 5,
+    ]
+
+    Ls: List[sp.Expr] = []
+    for j in range(6):
+        candidate = sp.cancel(-b_coeffs[j] * denominators[j])
+        num, den = sp.fraction(candidate)
+        reduced_num = G.reduce(num)[1]
+        L = sp.cancel(reduced_num / den)
+        if sp.denom(L) != 1:
+            raise ArithmeticError(f"L_{j} still has a denominator: {sp.denom(L)}")
+        Ls.append(sp.expand(L))
+
+    if verbose:
+        #  This reports the size of the expression.
+        for j, L in enumerate(Ls):
+            poly = sp.Poly(L, alpha, C, Y, rr)
+            max_alpha_degree = max(term[0][0] for term in poly.terms())
+            print(
+                f"normal form {j}: {len(poly.terms())} monomial terms, "
+                f"max alpha degree {max_alpha_degree}"
+            )
+
+    return Ls
 
 
-@lru_cache(maxsize=None)
-def abs_rr_value(a: Fraction) -> sp.Expr:
-    x = fraction_to_sympy(a)
-    return sp.sqrt(6 * x / (25 * (1 + 2 * x)))
+# ---------------------------------------------------------------------------
+# Bernstein conversion
+# ---------------------------------------------------------------------------
 
+# Given a polynomial and a degree, it computes the Bernstein coefficients of
+# such degree associated to the polynomial; returned as a  list of rational
+# numbers
+def bernstein_coeffs_from_power(
+    power_coeffs: Sequence[sp.Rational], degree: Optional[int] = None
+) -> List[sp.Rational]:
+    """Power basis to Bernstein basis on [0,1].
 
-def exact_floor_decimal(expr: sp.Expr, digits: int) -> Fraction:
-    scale = 10**digits
-    value = sp.floor(expr * scale)
-    if not value.is_Integer:
-        raise ArithmeticError(f"could not certify floor for {expr}")
-    return Fraction(int(value), scale)
+    If p(u)=sum_i a_i u^i and p(u)=sum_k binom(n,k)c_k u^k(1-u)^(n-k), then
 
+        c_k = sum_{i=0}^k a_i binom(k,i)/binom(n,i).
 
-def exact_ceil_decimal(expr: sp.Expr, digits: int) -> Fraction:
-    scale = 10**digits
-    value = sp.ceiling(expr * scale)
-    if not value.is_Integer:
-        raise ArithmeticError(f"could not certify ceiling for {expr}")
-    return Fraction(int(value), scale)
+    """
 
-
-def interval_exceeds_true_endpoint(interval: CoverInterval) -> bool:
-    comparison = (fraction_to_sympy(interval.a1) - TRUE_ENDPOINT).is_positive
-    if comparison is None:
-        return bool(sp.N(fraction_to_sympy(interval.a1) - TRUE_ENDPOINT, 80) > 0)
-    return bool(comparison)
-
-
-@lru_cache(maxsize=None)
-def scaled_c_floor(a: Fraction, digits: int) -> Fraction:
-    return exact_floor_decimal(scaled_c_value(a), digits)
-
-
-@lru_cache(maxsize=None)
-def scaled_c_ceil(a: Fraction, digits: int) -> Fraction:
-    return exact_ceil_decimal(scaled_c_value(a), digits)
-
-
-@lru_cache(maxsize=None)
-def scaled_v_floor(a: Fraction, digits: int) -> Fraction:
-    return exact_floor_decimal(scaled_v_value(a), digits)
-
-
-@lru_cache(maxsize=None)
-def scaled_v_ceil(a: Fraction, digits: int) -> Fraction:
-    return exact_ceil_decimal(scaled_v_value(a), digits)
-
-
-@lru_cache(maxsize=None)
-def abs_rr_floor(a: Fraction, digits: int) -> Fraction:
-    return exact_floor_decimal(abs_rr_value(a), digits)
-
-
-@lru_cache(maxsize=None)
-def abs_rr_ceil(a: Fraction, digits: int) -> Fraction:
-    return exact_ceil_decimal(abs_rr_value(a), digits)
-
-
-def rational_box(interval: CoverInterval, digits: int) -> Tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction]:
-    a0, a1 = interval.a0, interval.a1
-    scaled_c_min = scaled_c_floor(a0, digits)
-    scaled_c_max = scaled_c_ceil(a1, digits)
-    scaled_v_max = scaled_v_ceil(a0, digits)
-    if interval_exceeds_true_endpoint(interval):
-        scaled_v_min = Fraction(0)
-    else:
-        scaled_v_min = scaled_v_floor(a1, digits)
-    # rr is negative and decreases with alpha.
-    rr_min = -abs_rr_ceil(a1, digits)
-    rr_max = -abs_rr_floor(a0, digits)
-    return scaled_c_min, scaled_c_max, scaled_v_min, scaled_v_max, rr_min, rr_max
-
-
-def evaluate_normal_form_power_coefficients(form: PolynomialDict, scaled_c: Fraction, scaled_v: Fraction, rr: Fraction) -> List[Fraction]:
-    max_degree = max(len(poly) for poly in form.values())
-    out = [Fraction(0)] * max_degree
-    for (c_power, v_power, rr_power), poly in form.items():
-        scale = (scaled_c if c_power else 1) * (scaled_v if v_power else 1) * (rr if rr_power else 1)
-        for i, coeff in enumerate(poly):
-            out[i] += coeff * scale
-    while len(out) > 1 and out[-1] == 0:
-        out.pop()
-    return out
-
-
-def restrict_power_coefficients(poly: Sequence[Fraction], left: Fraction, right: Fraction) -> List[Fraction]:
-    width = right - left
-    n = len(poly) - 1
-    left_powers = [Fraction(1)] * (n + 1)
-    width_powers = [Fraction(1)] * (n + 1)
-    for i in range(1, n + 1):
-        left_powers[i] = left_powers[i - 1] * left
-        width_powers[i] = width_powers[i - 1] * width
-    out = [Fraction(0)] * (n + 1)
-    for m, coeff in enumerate(poly):
-        if coeff == 0:
-            continue
-        for i in range(m + 1):
-            out[i] += coeff * Fraction(comb(m, i)) * left_powers[m - i] * width_powers[i]
-    while len(out) > 1 and out[-1] == 0:
-        out.pop()
-    return out
-
-
-def bernstein_coefficients_from_power(poly: Sequence[Fraction], degree: Optional[int] = None) -> List[Fraction]:
-    m = len(poly) - 1
-    n = m if degree is None else degree
-    if n < m:
+    # The list is in power-basis order: [a_0, a_1, ...] for a_0+a_1*u+...
+    polynomial_degree = len(power_coeffs) - 1
+    n = polynomial_degree if degree is None else degree
+    if n < polynomial_degree:
         raise ValueError("Bernstein degree cannot be smaller than polynomial degree")
-    coeffs = list(poly) + [Fraction(0)] * (n + 1 - len(poly))
+
+    coeffs = list(power_coeffs) + [sp.Rational(0)] * (n + 1 - len(power_coeffs))
     return [
-        sum(coeffs[i] * Fraction(comb(k, i), comb(n, i)) for i in range(k + 1))
+        sum(coeffs[i] * sp.binomial(k, i) / sp.binomial(n, i) for i in range(k + 1))
         for k in range(n + 1)
     ]
 
 
-def bernstein_minimum_on_interval(poly: Sequence[Fraction], left: Fraction, right: Fraction, degree: Optional[int] = None) -> Fraction:
-    restricted = restrict_power_coefficients(poly, left, right)
-    return min(bernstein_coefficients_from_power(restricted, degree))
+def restrict_to_interval_power_coeffs(
+    power_coeffs: Sequence[sp.Rational], left: sp.Rational, right: sp.Rational
+) -> List[sp.Rational]:
+    """Return power coefficients of p(left + (right-left)u)."""
+
+    # Substitute alpha = left + (right-left)u; so u lives on [0,1] and we can
+    # check the sign of the polynomial by checking the sign of the Bernstein
+    # coefficients in the variable u.
+    width = right - left
+    n = len(power_coeffs) - 1
+    left_powers = [sp.Rational(1)] * (n + 1)
+    width_powers = [sp.Rational(1)] * (n + 1)
+    for i in range(1, n + 1):
+        left_powers[i] = left_powers[i - 1] * left
+        width_powers[i] = width_powers[i - 1] * width
+
+    out = [sp.Rational(0)] * (n + 1)
+    for m, coeff in enumerate(power_coeffs):
+        if coeff == 0:
+            continue
+        for i in range(m + 1):
+            out[i] += coeff * sp.binomial(m, i) * left_powers[m - i] * width_powers[i]
+
+    while len(out) > 1 and out[-1] == 0:
+        out.pop()
+    return out
+
+# Return the smallest Bernstein coefficient associated to a polynomial on a given
+# interval [left, right]
+def bernstein_min_on_interval(
+    power_coeffs: Sequence[sp.Rational],
+    left: sp.Rational,
+    right: sp.Rational,
+    degree: Optional[int] = None,
+) -> sp.Rational:
+    """Smallest Bernstein coefficient after restricting to [left,right]."""
+
+    restricted = restrict_to_interval_power_coeffs(power_coeffs, left, right)
+    return min(bernstein_coeffs_from_power(restricted, degree))
 
 
-@dataclass(frozen=True)
-class CoverResult:
-    idx: int
-    interval: CoverInterval
-    minimum: Fraction
-    coefficient_j: int
-    box: Tuple[Fraction, Fraction, Fraction, Fraction, Fraction, Fraction]
+def bernstein_coeffs_sympy(poly: sp.Expr, var: sp.Symbol, left, right) -> List[sp.Rational]:
+    """Convenience version used only for the small-alpha x-polynomials."""
+
+    u = sp.symbols("u")
+    q = sp.Poly(sp.expand(poly.subs(var, left + (right - left) * u)), u)
+    n = q.degree()
+    power = [q.coeff_monomial(u**i) for i in range(n + 1)]
+    return bernstein_coeffs_from_power(power, n)
+
+
+# ---------------------------------------------------------------------------
+# Exact coefficient bookkeeping for fast cover computations
+# ---------------------------------------------------------------------------
+
+
+def dense_L_dictionary(L: sp.Expr) -> Dict[Tuple[int, int, int], List[sp.Rational]]:
+    """Write a multi-affine L as polynomial coefficients in alpha.
+
+    Returns a dictionary keyed by (epsilon_C, epsilon_Y, epsilon_rr).  The value
+    is a dense list of coefficients in increasing powers of alpha.
+    """
+
+    # Because L is separately affine, each key only needs exponents 0 or 1
+    # for C,Y,rr.  The remaining alpha-dependence is stored as a dense list.
+    P = sp.Poly(sp.expand(L), alpha, C, Y, rr, domain=sp.QQ)
+    sparse: Dict[Tuple[int, int, int], Dict[int, sp.Rational]] = {}
+    for monomial, coeff in P.terms():
+        ea, eC, eY, err = monomial
+        if eC > 1 or eY > 1 or err > 1:
+            raise ArithmeticError(f"L is not separately affine; saw monomial {monomial}")
+        key = (eC, eY, err)
+        sparse.setdefault(key, {})[ea] = coeff
+
+    dense: Dict[Tuple[int, int, int], List[sp.Rational]] = {}
+    for key, coeffs in sparse.items():
+        degree = max(coeffs)
+        row = [sp.Rational(0)] * (degree + 1)
+        for exponent, coeff in coeffs.items():
+            row[exponent] = coeff
+        dense[key] = row
+    return dense
+
+
+def evaluate_L_power_coeffs(
+    Ldict: Dict[Tuple[int, int, int], List[sp.Rational]],
+    Cval: sp.Rational,
+    Yval: sp.Rational,
+    rrval: sp.Rational,
+) -> List[sp.Rational]:
+    """Substitute a box corner for C,Y,rr and return alpha-power coefficients."""
+
+    # At a fixed box corner the C,Y,rr factors are rational constants, so L_j
+    # becomes an ordinary one-variable polynomial in alpha.
+    max_degree = max(len(row) - 1 for row in Ldict.values())
+    out = [sp.Rational(0)] * (max_degree + 1)
+    for (eC, eY, err), row in Ldict.items():
+        scale = (Cval if eC else 1) * (Yval if eY else 1) * (rrval if err else 1)
+        for i, coeff in enumerate(row):
+            out[i] += coeff * scale
+
+    while len(out) > 1 and out[-1] == 0:
+        out.pop()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Six-decimal rational enclosures
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=None)
+def C_physical(a: sp.Rational) -> sp.Expr:
+    """Actual expression of C=(1+3 alpha)c_r."""
+
+    return (sp.Rational(5) - 3 * a + sp.sqrt(1 + 102 * a + 249 * a**2)) / 4
+
+
+@lru_cache(maxsize=None)
+def Y_physical(a: sp.Rational) -> sp.Expr:
+    """Actual expression of Y=(1+3 alpha)V_2."""
+
+    # Y depends on the selected physical C branch.  The nested square root is
+    # left symbolic until we take certified decimal floors/ceilings.
+    Cval = C_physical(a)
+    cr = Cval / (1 + 3 * a)
+    gamma = 1 + 2 * a
+    V1 = (sp.Rational(3) / (1 + 3 * a) + 2 - 2 * cr) / (3 * gamma)
+    V2 = sp.Rational(1, 4) * (
+        -1 + 3 * cr + 3 * V1 - sp.sqrt((1 - 3 * cr - 3 * V1) ** 2 - 24 * cr * V1)
+    )
+    return (1 + 3 * a) * V2
+
+
+@lru_cache(maxsize=None)
+def rr_magnitude_physical(a: sp.Rational) -> sp.Expr:
+    """Positive magnitude of the signed paper variable rr."""
+
+    return sp.sqrt(6 * a / (25 * (1 + 2 * a)))
+
+
+def floor_decimal_expr(expr: sp.Expr, digits: int = 6) -> sp.Rational:
+    """Round an exact SymPy expression downward to a rational decimal.
+
+    Returns floor(expr * 10**digits) / 10**digits as an exact rational.
+    The helper does not use numerical approximation; it verifies the floor
+    by exact inequalities."""
+
+    scale = 10**digits
+    return sp.Rational(verified_scaled_floor(expr, scale), scale)
+
+
+def ceil_decimal_expr(expr: sp.Expr, digits: int = 6) -> sp.Rational:
+    """Round an exact SymPy expression upward to a rational decimal.
+
+    Returns ceiling(expr * 10**digits) / 10**digits as an exact rational.
+    Again, the helper does not use numerical approximation; it verifies the ceiling
+    by exact inequalities."""
+
+    scale = 10**digits
+    return sp.Rational(verified_scaled_ceiling(expr, scale), scale)
+
+
+def floor_decimal(q: sp.Rational, places: int = 4) -> sp.Rational:
+    """Round a rational downward to a fixed number of decimal places."""
+
+    scale = 10**places
+    return sp.Rational(int(sp.floor(q * scale)), scale)
+
+
+def decimal_string(q: sp.Rational, places: int = 4) -> str:
+    """Decimal string rounded downward to a fixed number of places."""
+
+    q = floor_decimal(q, places)
+    whole = q.p // q.q
+    rem = q.p % q.q
+    digits = str((rem * (10**places)) // q.q).zfill(places)
+    return f"{whole}.{digits}"
+
+
+def display_decimal(q: sp.Rational) -> str:
+    """Printing helper; use one decimal for very large entries, otherwise four decimals."""
+
+    if q >= 100:
+        return decimal_string(q, 1)
+    return decimal_string(q, 4)
+
+
+def right_endpoint_reaches_true_endpoint(interval: CoverInterval) -> bool:
+    """Return True if an interval's right endpoint is at or past 1+sqrt(2)."""
+
+    comparison = (interval.a1 - TRUE_ENDPOINT).is_nonnegative
+    if comparison is None:
+        raise ArithmeticError(
+            f"could not certify endpoint comparison for {interval.tex_interval()}"
+        )
+    return bool(comparison)
+
+
+def verified_scaled_floor(expr: sp.Expr, scale: int) -> int:
+    """Return floor(scale*expr), verified by exact sign checks."""
+
+    scaled = sp.simplify(scale * expr)
+    candidate = sp.floor(scaled)
+    if candidate.is_Integer is not True:
+        raise ArithmeticError(f"could not compute exact floor of {scaled}")
+    if (scaled - candidate).is_nonnegative is not True:
+        raise ArithmeticError(f"uncertified floor lower inequality for {scaled}")
+    if (scaled - (candidate + 1)).is_negative is not True:
+        raise ArithmeticError(f"uncertified floor upper inequality for {scaled}")
+    return int(candidate)
+
+
+def verified_scaled_ceiling(expr: sp.Expr, scale: int) -> int:
+    """Return ceiling(scale*expr), verified by exact sign checks."""
+
+    scaled = sp.simplify(scale * expr)
+    candidate = sp.ceiling(scaled)
+    if candidate.is_Integer is not True:
+        raise ArithmeticError(f"could not compute exact ceiling of {scaled}")
+    if (scaled - candidate).is_nonpositive is not True:
+        raise ArithmeticError(f"uncertified ceiling upper inequality for {scaled}")
+    if (scaled - (candidate - 1)).is_positive is not True:
+        raise ArithmeticError(f"uncertified ceiling lower inequality for {scaled}")
+    return int(candidate)
+
+
+def rational_box(
+    interval: CoverInterval, digits: int = 6
+) -> Tuple[sp.Rational, sp.Rational, sp.Rational, sp.Rational, sp.Rational, sp.Rational]:
+    """Return a rational box containing C,Y,rr over one alpha interval; taking
+    advantage of their monotonicity properties.
+
+    C is increasing, Y is decreasing, and rr is negative and decreasing.  The
+    final interval extends beyond that irrational endpoint, so its lower Y-bound
+    is set to 0.
+    """
+
+    lo, hi = interval.a0, interval.a1
+
+    # Monotonicity lets us bound C, Y, rr on the entire interval by using the
+    # endpoint values. We use floors for lower bounds and ceilings for upper
+    # bounds so the box is safely outward-rounded.
+
+    Cminus = floor_decimal_expr(C_physical(lo), digits)
+    Cplus = ceil_decimal_expr(C_physical(hi), digits)
+    Yminus = sp.Rational(0) if right_endpoint_reaches_true_endpoint(interval) else floor_decimal_expr(Y_physical(hi), digits)
+    Yplus = ceil_decimal_expr(Y_physical(lo), digits)
+    rrminus = -ceil_decimal_expr(rr_magnitude_physical(hi), digits)
+    rrplus = -floor_decimal_expr(rr_magnitude_physical(lo), digits)
+
+    return Cminus, Cplus, Yminus, Yplus, rrminus, rrplus
+
+
+# ---------------------------------------------------------------------------
+# Small-alpha and rational-cover verification
+# ---------------------------------------------------------------------------
+
+
+def small_alpha_table(Ls: Sequence[sp.Expr]) -> List[Tuple[int, int, sp.Rational]]:
+    """Check 0 < alpha <= 10^(-2) using x=sqrt(alpha)."""
+
+    # The small-alpha argument is written in x=sqrt(alpha).  Factoring the first x-power leaves a
+    # polynomial that can be checked by Bernstein coefficients.
+    x = sp.symbols("x")
+    rows: List[Tuple[int, int, sp.Rational]] = []
+    for j, L in enumerate(Ls):
+        minimum: Optional[sp.Rational] = None
+        exponents = set()
+        for Ccorner in [sp.Rational(3, 2), sp.Rational(3, 2) + 13 * x**2]:
+            for Ycorner in [sp.Rational(3, 4) - 7 * x**2, sp.Rational(3, 4)]:
+                for rrcorner in [-sp.Rational(1, 2) * x, -sp.Rational(12, 25) * x]:
+                    # Substitute one corner of the small-alpha box.  If the
+                    # resulting polynomial is positive at every such corner,
+                    # we obtain positivity throughout the box.
+                    expr = sp.expand(L.subs({alpha: x**2, C: Ccorner, Y: Ycorner, rr: rrcorner}))
+                    p = sp.Poly(expr, x)
+                    powers = [mon[0][0] for mon in p.terms() if mon[1] != 0]
+                    first_power = min(powers)
+                    exponents.add(first_power)
+                    reduced = sp.expand(expr / x**first_power)
+                    local_min = min(bernstein_coeffs_sympy(reduced, x, 0, sp.Rational(1, 10)))
+                    minimum = local_min if minimum is None else min(minimum, local_min)
+
+        if len(exponents) != 1 or minimum is None or minimum <= 0:
+            raise AssertionError(f"small-alpha check failed for j={j}")
+        rows.append((j, sorted(exponents)[0], minimum))
+    return rows
 
 
 def verify_interval(
     idx: int,
     interval: CoverInterval,
-    normal_forms: Sequence[PolynomialDict],
-    box_digits: int,
+    Ldicts: Sequence[Dict[Tuple[int, int, int], List[sp.Rational]]],
+    box_digits: int = 6,
     bernstein_degree: Optional[int] = None,
 ) -> CoverResult:
-    scaled_c_min, scaled_c_max, scaled_v_min, scaled_v_max, rr_min, rr_max = rational_box(interval, box_digits)
-    minimum: Optional[Fraction] = None
+    """Verify all six L_j on one rational cover interval."""
+
+    Cminus, Cplus, Yminus, Yplus, rrminus, rrplus = rational_box(interval, box_digits)
+    minimum: Optional[sp.Rational] = None
     coefficient_j: Optional[int] = None
-    for j, form in enumerate(normal_forms):
-        for c_corner, v_corner, rr_corner in product(
-            [scaled_c_min, scaled_c_max], [scaled_v_min, scaled_v_max], [rr_min, rr_max]
+
+    # Each L_j is affine in C,Y,rr, so checking all eight corners of the box is
+    # enough to bound the whole box.
+    for j, Ldict in enumerate(Ldicts):
+        for Ccorner, Ycorner, rrcorner in product(
+            [Cminus, Cplus], [Yminus, Yplus], [rrminus, rrplus]
         ):
-            power_coefficients = evaluate_normal_form_power_coefficients(form, c_corner, v_corner, rr_corner)
-            local_minimum = bernstein_minimum_on_interval(
-                power_coefficients, interval.a0, interval.a1, bernstein_degree
+            power_coeffs = evaluate_L_power_coeffs(Ldict, Ccorner, Ycorner, rrcorner)
+            local_min = bernstein_min_on_interval(
+                power_coeffs, interval.a0, interval.a1, bernstein_degree
             )
-            if minimum is None or local_minimum < minimum:
-                minimum = local_minimum
+            if minimum is None or local_min < minimum:
+                minimum = local_min
                 coefficient_j = j
+
     assert minimum is not None and coefficient_j is not None
     if minimum <= 0:
         raise AssertionError(
-            f"failed on interval {interval.tex_interval()}, coefficient j={coefficient_j}, minimum={minimum}"
+            f"failed on interval {interval.tex_interval()}, j={coefficient_j}, minimum={minimum}"
         )
+
     return CoverResult(
         idx=idx,
         interval=interval,
         minimum=minimum,
         coefficient_j=coefficient_j,
-        box=(scaled_c_min, scaled_c_max, scaled_v_min, scaled_v_max, rr_min, rr_max),
+        C_bounds=(Cminus, Cplus),
+        Y_bounds=(Yminus, Yplus),
+        rr_bounds=(rrminus, rrplus),
     )
 
 
-def decimal_down(value: Fraction, digits: int = 4) -> str:
-    scale = 10**digits
-    scaled = value.numerator * scale // value.denominator
-    sign = "-" if scaled < 0 else ""
-    scaled = abs(scaled)
-    return f"{sign}{scaled // scale}.{scaled % scale:0{digits}d}"
-
-
-def display_decimal(value: Fraction) -> str:
-    return decimal_down(value, 1 if value >= 100 else 4)
-
-
-# ---------------------------------------------------------------------------
-# Small-alpha verification
-# ---------------------------------------------------------------------------
-
-
-def poly_x_add(p: List[Fraction], q: List[Fraction]) -> List[Fraction]:
-    n = max(len(p), len(q))
-    out = [Fraction(0)] * n
-    for i in range(n):
-        out[i] = (p[i] if i < len(p) else 0) + (q[i] if i < len(q) else 0)
-    while len(out) > 1 and out[-1] == 0:
-        out.pop()
-    return out
-
-
-def poly_x_mul(p: List[Fraction], q: List[Fraction]) -> List[Fraction]:
-    out = [Fraction(0)] * (len(p) + len(q) - 1)
-    for i, ci in enumerate(p):
-        if ci == 0:
-            continue
-        for j, cj in enumerate(q):
-            if cj:
-                out[i + j] += ci * cj
-    while len(out) > 1 and out[-1] == 0:
-        out.pop()
-    return out
-
-
-def alpha_poly_to_x_squared(poly: Poly) -> List[Fraction]:
-    out = [Fraction(0)] * (2 * (len(poly) - 1) + 1)
-    for i, coeff in enumerate(poly):
-        out[2 * i] = coeff
-    while len(out) > 1 and out[-1] == 0:
-        out.pop()
-    return out
-
-
-def small_alpha_table(normal_forms: Sequence[PolynomialDict]) -> List[Tuple[int, int, Fraction]]:
-    c_corners = [[Fraction(3, 2)], [Fraction(3, 2), Fraction(0), Fraction(13)]]
-    v_corners = [[Fraction(3, 4), Fraction(0), Fraction(-7)], [Fraction(3, 4)]]
-    rr_corners = [[Fraction(0), Fraction(-1, 2)], [Fraction(0), Fraction(-12, 25)]]
-    rows: List[Tuple[int, int, Fraction]] = []
-    for j, form in enumerate(normal_forms):
-        minimum: Optional[Fraction] = None
-        exponents = set()
-        for c_corner in c_corners:
-            for v_corner in v_corners:
-                for rr_corner in rr_corners:
-                    total = [Fraction(0)]
-                    for (c_power, v_power, rr_power), alpha_poly in form.items():
-                        term = alpha_poly_to_x_squared(alpha_poly)
-                        if c_power:
-                            term = poly_x_mul(term, c_corner)
-                        if v_power:
-                            term = poly_x_mul(term, v_corner)
-                        if rr_power:
-                            term = poly_x_mul(term, rr_corner)
-                        total = poly_x_add(total, term)
-                    first_nonzero = next(i for i, coeff in enumerate(total) if coeff)
-                    exponents.add(first_nonzero)
-                    reduced = total[first_nonzero:]
-                    local_minimum = bernstein_minimum_on_interval(reduced, Fraction(0), Fraction(1, 10))
-                    if minimum is None or local_minimum < minimum:
-                        minimum = local_minimum
-        if len(exponents) != 1 or minimum is None or minimum <= 0:
-            raise AssertionError(f"small-alpha check failed for j={j}")
-        rows.append((j, next(iter(exponents)), minimum))
-    return rows
-
-
 def verify_cover(
-    normal_forms: Sequence[PolynomialDict],
+    Ldicts: Sequence[Dict[Tuple[int, int, int], List[sp.Rational]]],
     intervals: Sequence[CoverInterval],
-    box_digits: int,
+    box_digits: int = 6,
     bernstein_degree: Optional[int] = None,
 ) -> List[CoverResult]:
+    """Run the verifier over a supplied list of rational cover intervals."""
+
+    # The caller supplies intervals.
     return [
-        verify_interval(i, interval, normal_forms, box_digits, bernstein_degree)
+        verify_interval(i, interval, Ldicts, box_digits, bernstein_degree)
         for i, interval in enumerate(intervals, 1)
     ]
 
 
-def write_tex_tables(path: Path, small_rows: Sequence[Tuple[int, int, Fraction]], cover_rows: Sequence[CoverResult]) -> None:
+# ---------------------------------------------------------------------------
+# Reporting helpers and command-line entry point
+# ---------------------------------------------------------------------------
+
+
+def write_tex_tables(
+    path: Path,
+    small_rows: Sequence[Tuple[int, int, sp.Rational]],
+    cover_rows: Sequence[CoverResult],
+) -> None:
+    """Write the TeX tables.
+
+    The first table records the small-alpha exponent m_j and Bernstein lower
+    bound.  The second table records the interval lower bound mu_I for each
+    rational cover interval.
+    """
+
     with path.open("w", encoding="utf-8") as handle:
         handle.write("% Generated by verify_bernstein_q_rational_cover.py\n")
         handle.write("\\begin{tabular}{c|c|c}\n")
         handle.write("$j$ & $m_j$ & smallest Bernstein coefficient of $\\mathsf S_j$ \\\\ \\hline\n")
         for j, exponent, value in small_rows:
-            handle.write(f"{j} & {exponent} & ${sp.latex(fraction_to_sympy(value))}$ \\\\ \n")
+            handle.write(f"{j} & {exponent} & ${sp.latex(value)}$ \\\\ \n")
         handle.write("\\end{tabular}\n\n")
 
         handle.write("\\begin{longtable}{c|c|c}\n")
@@ -937,32 +649,81 @@ def write_tex_tables(path: Path, small_rows: Sequence[Tuple[int, int, Fraction]]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Parse CLI options, derive L_j, and run both verification passes."""
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--box-digits", type=int, default=6, help="decimal digits used in rational endpoint boxes")
+    parser.add_argument(
+        "--box-digits",
+        type=int,
+        default=6,
+        help="decimal digits used in rational C/Y/rr endpoint boxes",
+    )
     parser.add_argument(
         "--bernstein-degree",
         type=int,
         default=None,
-        help="optional common Bernstein degree for interval polynomials; by default each polynomial uses its own degree",
+        help=(
+            "optional common Bernstein degree for interval polynomials; "
+            "by default each polynomial uses its own degree"
+        ),
     )
     parser.add_argument(
         "--tex-tables",
         type=Path,
         help="create or overwrite this file with the generated TeX tables",
     )
-    parser.add_argument("--verbose", action="store_true", help="print normal-form details and every interval")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print normal-form details and every cover interval",
+    )
     args = parser.parse_args(argv)
+    start = perf_counter()
 
-    normal_forms = build_normal_forms(verbose=args.verbose)
-    small_rows = small_alpha_table(normal_forms)
-    cover_rows = verify_cover(normal_forms, full_cover(), args.box_digits, args.bernstein_degree)
+    # Sanity-check that the cover really reaches the intended endpoints.
+    if COVER[-1].a1 != RATIONAL_ENDPOINT:
+        raise AssertionError("cover does not end at the declared rational endpoint")
+    if not right_endpoint_reaches_true_endpoint(COVER[-1]):
+        raise AssertionError("cover does not reach 1+sqrt(2)")
+
+    # Build the symbolic L_j forms with SymPy, then convert them to list of
+    # coefficients so the interval checks are performed by doing exact rational arithmetic.
+    if args.verbose:
+        print("Building the six L_j polynomials from the phase-plane definitions...")
+    Ls = build_L_expressions(verbose=args.verbose)
+    Ldicts = [dense_L_dictionary(L) for L in Ls]
+
+    # Verify that the Groebner reduction gave the expected multi-affine shape.
+
+    if args.verbose:
+        print("\nMulti-affine check for L_j:")
+    for j, L in enumerate(Ls):
+        num = sp.Poly(L, alpha, C, Y, rr, domain=sp.QQ)
+        degC = sp.Poly(L, C).degree()
+        degY = sp.Poly(L, Y).degree()
+        deg_rr = sp.Poly(L, rr).degree()
+        if max(degC, degY, deg_rr) > 1:
+            raise AssertionError(f"L_{j} is not affine in C,Y,rr")
+        if args.verbose:
+            print(f"  L_{j}: terms={len(num.terms()):3d}, deg_C={degC}, deg_Y={degY}, deg_rr={deg_rr}")
+
+    # Run the small-alpha proof and the rational-cover proof.
+    small_rows = small_alpha_table(Ls)
+    cover_rows = verify_cover(Ldicts, COVER, args.box_digits, args.bernstein_degree)
 
     print("Small-alpha check passed.")
     print(f"Rational-cover check passed on {len(cover_rows)} intervals in [10^(-2),1+sqrt(2)].")
-    print(f"Box endpoints use {args.box_digits} decimal digits and exact rational arithmetic.")
+    print(f"Box endpoints use {args.box_digits} decimal digits; interval checks use exact rational arithmetic.")
     print(f"Global minimum lower bound in the cover: {display_decimal(min(row.minimum for row in cover_rows))}")
 
     if args.verbose:
+        print("\nSmall-alpha rows:")
+        print("j  m_j  smallest Bernstein coefficient of S_j on [0,1/10]")
+        for j, exponent, value in small_rows:
+            print(f"{j}  {exponent:>3}  {value}")
+
+        print("\nUnified rational cover:")
+        print("#   interval              lower bound    coefficient")
         for row in cover_rows:
             print(
                 f"{row.idx:2d} [{row.interval.left},{row.interval.right}] "
@@ -972,6 +733,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.tex_tables:
         write_tex_tables(args.tex_tables, small_rows, cover_rows)
         print(f"Wrote TeX tables to {args.tex_tables}")
+
+    print(f"Total verification time: {perf_counter() - start:.2f} seconds.")
 
     return 0
 

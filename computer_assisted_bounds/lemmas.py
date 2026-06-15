@@ -28,7 +28,7 @@ from parameters import (
 )
 
 ########################################
-#Set the verbosity from parameters.py
+# Set the verbosity from parameters.py
 
 def set_verbose(level: int = 1, *, print_subintervals=None) -> None:
     """Set runtime verbosity from script.py."""
@@ -37,7 +37,7 @@ def set_verbose(level: int = 1, *, print_subintervals=None) -> None:
         parameters.PRINT_SUBINTERVALS = bool(print_subintervals)
 
 ########################################
-#Sanity check to verify no RBF has unresolved uncertainty.
+# Sanity check to verify no RBF has unresolved uncertainty.
 
 def o(x: Any) -> bool:
     """Return True when Sage did not print an uncertainty marker for x."""
@@ -243,8 +243,8 @@ class Expr:
 
 ##############################################
 # Constant node in the expression tree.
-#Transforms a given rational number into a node of the expression tree,
-#treating the constant as an exact RBF element. If want_derivative, it returns
+# Transforms a given rational number into a node of the expression tree,
+# treating the constant as an exact RBF element. If want_derivative, it returns
 # zero (that is the derivative of a constant is zero)
 @dataclass(frozen=True)
 class Const(Expr):
@@ -403,7 +403,7 @@ class Sqrt(Expr):
 
 class Shared(Expr):
     """Memoizing wrapper.
-    Each (id(self), want_derivative) is evaluated at most once per box.
+    Each (id(self), want_derivative) is evaluated at most once per box,
     because the cache lives on Context and is cleared at the start of every
     top-level eval_direct/eval_derivative call.
     """
@@ -432,7 +432,7 @@ ExprLike = Union[Expr, int, str]
 
 ##############################################
 # Helper that makes sure constants are converted to
-# the class Expr
+# an Expr
 def as_expr(x: Any) -> Expr:
     if isinstance(x, Expr):
         return x
@@ -451,7 +451,7 @@ def sqrt_expr(x: Any, label: Optional[str] = None) -> Expr:
 
 
 ########################################
-#To build expressions
+# To build expressions
 class ProblemAPI:
     def __init__(self, default_interval: Optional[Sequence[Any]] = None):
         # The DSL is one-variable.  `alpha` is kept as the historical name,
@@ -751,8 +751,8 @@ def prove_table_row(
 # ---------------------------------------------------------------------------
 # Explicit formulae for the six rescaled Bernstein coefficients
 # ---------------------------------------------------------------------------
-# Shared quantities used by every b5b* coefficient formula. We use the node
-# shared so in each subinterval the enclosures of such quantities
+# Shared quantities used by every b5b* coefficient formula. We use the shared 
+# node so in each subinterval the enclosures of such quantities
 # are cached
 def make_cr_and_V2(alpha, api):
     """Build cr(alpha) and V2(alpha).
