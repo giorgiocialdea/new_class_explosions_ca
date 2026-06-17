@@ -1,6 +1,6 @@
 # Computer-assisted verification for A new class of Euler explosions
 
-This repository accompanies the paper [A new class of Euler explosions](https://www.arxiv.com) and contains the code and supplementary data used to reproduce the computer-assisted parts of the proof.
+This repository accompanies the paper [A new class of Euler explosions](https://arxiv.org/abs/2606.18152) and contains the code and supplementary data used to reproduce the computer-assisted parts of the proof.
 
 ## Requirements
 
